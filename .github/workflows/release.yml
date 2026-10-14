@@ -29,7 +29,8 @@ jobs:
         include:
           - { os: macos-15, target: aarch64-apple-darwin, platform: macos-aarch64, exe: craft-vba }
           - { os: macos-15, target: x86_64-apple-darwin, platform: macos-x86_64, exe: craft-vba }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, platform: linux-x86_64, exe: craft-vba }
+          # Static (musl), so it runs on any x86_64 Linux whatever its C library.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, platform: linux-x86_64, exe: craft-vba }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-x64, exe: craft-vba.exe }
     runs-on: ${{ matrix.os }}
     steps:
@@ -38,6 +39,9 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -yq musl-tools
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
