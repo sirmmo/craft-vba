@@ -153,14 +153,14 @@ fn parse_address(s: &str) -> Option<(String, (u32, u32, u32, u32))> {
 }
 
 /// `#RRGGBB` → VBA's colour number (`R + G*256 + B*65536`).
-fn color_from_hex(h: &str) -> Option<i32> {
+pub(crate) fn color_from_hex(h: &str) -> Option<i32> {
     let h = h.strip_prefix('#')?;
     let v = u32::from_str_radix(h, 16).ok()?;
     let (r, g, b) = ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
     i32::try_from(r | (g << 8) | (b << 16)).ok()
 }
 
-fn color_to_hex(n: i32) -> String {
+pub(crate) fn color_to_hex(n: i32) -> String {
     let n = n.max(0) as u32;
     format!("#{:02X}{:02X}{:02X}", n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF)
 }
@@ -195,7 +195,7 @@ pub fn to_json(v: &Value) -> R<Json> {
     })
 }
 
-fn host_error(e: HostError) -> VbaError {
+pub(crate) fn host_error(e: HostError) -> VbaError {
     let code = e.data.get("code").and_then(Json::as_str).unwrap_or("");
     let number = match code {
         "ItemNotFound" => 9,

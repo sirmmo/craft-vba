@@ -4,6 +4,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::excel::XlObj;
+use crate::powerpoint::PpObj;
+
+impl Obj {
+    /// An object of the host application (its model answers for it).
+    pub fn is_host(&self) -> bool {
+        matches!(self, Obj::Xl(_) | Obj::Pp(_))
+    }
+}
 
 /// A run-time error: VBA's number and description.
 #[derive(Clone, Debug, PartialEq)]
@@ -122,7 +130,10 @@ impl Array {
 /// An object reference.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Obj {
+    /// Excel's objects (GridCraft).
     Xl(XlObj),
+    /// PowerPoint's objects (DeckCraft).
+    Pp(PpObj),
     /// The `Err` object.
     Err,
     /// The `Debug` object.
@@ -165,6 +176,7 @@ impl Value {
             Value::Str(_) => "String",
             Value::Array(_) => "Variant()",
             Value::Object(Obj::Xl(x)) => x.type_name(),
+            Value::Object(Obj::Pp(x)) => x.type_name(),
             Value::Object(Obj::Err) => "ErrObject",
             Value::Object(Obj::Debug) => "Debug",
             Value::Object(Obj::Collection(_)) => "Collection",

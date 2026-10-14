@@ -8,11 +8,10 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value as Json, json};
 
-use crate::excel::XlObj;
 use crate::host::{Host, HostError};
+use crate::model::App;
 use crate::ovba::{ModuleKind, Project};
 use crate::vba::ast::ProcKind;
-use crate::vba::value::{Obj, Value};
 use crate::vba::{Interp, Program};
 
 /// Longest line read (a large project in base64 fits).
@@ -24,9 +23,9 @@ pub fn manifest() -> Json {
         "id": "org.craft.vba",
         "name": "VBA",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Runs the workbook's VBA macros, and edits and records them (the Developer tab).",
+        "description": "Runs the document's VBA macros (Excel's objects in GridCraft, PowerPoint's in DeckCraft), and edits and records them (the Developer tab).",
         "author": "Marco Montanari and the craft-vba contributors",
-        "apps": ["gridcraft"],
+        "apps": ["gridcraft", "deckcraft"],
         "run": {"command": "./craft-vba"},
         "macros": {"language": "VBA"},
         "commands": []
@@ -119,11 +118,11 @@ fn fail(message: impl Into<String>) -> Fail {
     (1, message.into(), Json::Null)
 }
 
-fn project(host: &mut dyn Host) -> Result<Option<Project>, Fail> {
+fn project(app: App, host: &mut dyn Host) -> Result<Option<Project>, Fail> {
     let out = host.call("host/vbaProject/get", json!({})).map_err(|e| (e.code, e.message, e.data))?;
     match out.get("base64").and_then(Json::as_str) {
         Some(b) if !b.is_empty() => {
-            let bytes = crate::base64::decode(b).ok_or_else(|| fail("the workbook's VBA project isn't valid base64"))?;
+            let bytes = crate::base64::decode(b).ok_or_else(|| fail(format!("the {}'s VBA project isn't valid base64", app.document())))?;
             Project::read(&bytes).map(Some).map_err(fail)
         }
         _ => Ok(None),
@@ -144,13 +143,18 @@ fn str_param<'a>(params: &'a Json, key: &str) -> Result<&'a str, Fail> {
     params.get(key).and_then(Json::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| (-32602, format!("`{key}` (text) is required"), Json::Null))
 }
 
-/// Answers one request from the app.
-pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, Fail> {
+/// Answers one request from the app. `initialize` sets `app` from its `host.id`: DeckCraft's
+/// macros get PowerPoint's objects, every other app Excel's.
+pub fn handle(app: &mut App, host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, Fail> {
+    let doc = app.document();
     match method {
-        "initialize" => Ok(json!({"protocolVersion": 1, "capabilities": {"macros": {"language": "VBA"}}})),
+        "initialize" => {
+            *app = App::for_host(params.get("host").and_then(|h| h.get("id")).and_then(Json::as_str).unwrap_or(""));
+            Ok(json!({"protocolVersion": 1, "capabilities": {"macros": {"language": "VBA"}}}))
+        }
         "commands/run" => Err(fail("craft-vba has no commands of its own; run macros with macros/run")),
         "macros/list" => {
-            let Some(p) = project(host)? else { return Ok(json!({"macros": []})) };
+            let Some(p) = project(*app, host)? else { return Ok(json!({"macros": []})) };
             let prog = program(&p);
             let mut macros = Vec::new();
             for m in &prog.modules {
@@ -167,14 +171,14 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
             Ok(json!({"macros": macros}))
         }
         "macros/modules" => {
-            let Some(p) = project(host)? else { return Ok(json!({"modules": []})) };
+            let Some(p) = project(*app, host)? else { return Ok(json!({"modules": []})) };
             Ok(json!({"modules": p.modules.iter().map(|m| json!({"name": m.name, "kind": m.kind.as_str(), "source": m.source})).collect::<Vec<_>>()}))
         }
         "macros/run" => {
             let name = str_param(params, "name")?;
-            let p = project(host)?.ok_or_else(|| fail(format!("Cannot run the macro '{name}'. This workbook has no macros.")))?;
+            let p = project(*app, host)?.ok_or_else(|| fail(format!("Cannot run the macro '{name}'. This {doc} has no macros.")))?;
             let prog = program(&p);
-            let mut it = Interp::new(&prog, host);
+            let mut it = Interp::for_app(&prog, host, *app);
             let (m, pr) = it.find(name).map_err(fail)?;
             // From a ribbon button: Excel passes the button (`Sub Go(control As IRibbonControl)`);
             // a macro without parameters runs as it is.
@@ -183,7 +187,7 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
                 && it.param_count(m, pr) > 0
             {
                 let text = |k: &str| -> std::rc::Rc<str> { c.get(k).and_then(Json::as_str).unwrap_or("").into() };
-                args.push(Value::Object(Obj::Xl(XlObj::RibbonControl { id: text("id"), tag: text("tag") })));
+                args.push(it.model.ribbon_control(text("id"), text("tag")));
             }
             match it.run_with(m, pr, args) {
                 Ok(()) => Ok(json!({})),
@@ -193,7 +197,7 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
         "macros/saveModule" => {
             let name = str_param(params, "name")?;
             let source = params.get("source").and_then(Json::as_str).ok_or_else(|| (-32602, "`source` (text) is required".to_string(), Json::Null))?;
-            let mut p = project(host)?.unwrap_or_else(Project::new);
+            let mut p = project(*app, host)?.unwrap_or_else(Project::new);
             if p.module(name).is_some_and(|m| m.kind != ModuleKind::Standard) {
                 // Document and class modules keep their kind; only their source changes.
                 if let Some(m) = p.modules.iter_mut().find(|m| m.name.eq_ignore_ascii_case(name)) {
@@ -212,9 +216,9 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
         }
         "macros/deleteModule" => {
             let name = str_param(params, "name")?;
-            let mut p = project(host)?.ok_or_else(|| fail("This workbook has no macros."))?;
+            let mut p = project(*app, host)?.ok_or_else(|| fail(format!("This {doc} has no macros.")))?;
             if p.module(name).is_some_and(|m| m.kind == ModuleKind::Document) {
-                return Err(fail(format!("{name} belongs to the workbook and can't be removed")));
+                return Err(fail(format!("{name} belongs to the {doc} and can't be removed")));
             }
             if !p.remove_module(name) {
                 return Err(fail(format!("There's no module named {name}")));
@@ -222,6 +226,7 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
             save(host, &p)?;
             Ok(json!({}))
         }
+        "macros/record" if *app == App::PowerPoint => Err(fail("PowerPoint has no macro recorder")),
         "macros/record" => {
             let steps = params.get("steps").and_then(Json::as_array).cloned().unwrap_or_default();
             let name = params
@@ -238,6 +243,7 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
 /// Serves the app until it closes the stream or says `shutdown`.
 pub fn serve<R: BufRead, W: Write>(input: R, output: W) {
     let mut io = Stdio::new(input, output);
+    let mut app = App::default();
     while let Some(msg) = io.read() {
         let Some(method) = msg.get("method").and_then(Json::as_str).map(str::to_string) else { continue };
         let Some(id) = msg.get("id").cloned() else {
@@ -248,7 +254,7 @@ pub fn serve<R: BufRead, W: Write>(input: R, output: W) {
         };
         let params = msg.get("params").cloned().unwrap_or(Json::Null);
         // A bug here must cost the request, never the add-in.
-        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&mut io, &method, &params)))
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&mut app, &mut io, &method, &params)))
             .unwrap_or_else(|_| Err(fail("craft-vba hit an internal error")));
         let reply = match answer {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),

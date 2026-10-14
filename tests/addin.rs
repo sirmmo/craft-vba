@@ -1,12 +1,15 @@
 //! The add-in end to end: the `craft-vba` binary, driven over its standard input and output by a
 //! test playing the app (which answers the add-in's `host/…` requests from a workbook in memory).
 
+#[path = "../src/fakedeck.rs"]
+mod fakedeck;
 #[path = "../src/fakehost.rs"]
 mod fakehost;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use fakedeck::Deck;
 use fakehost::Book;
 use serde_json::{Value as Json, json};
 
@@ -15,6 +18,8 @@ struct App {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     book: Book,
+    /// Answers the host requests instead of the workbook when the app is DeckCraft.
+    deck: Option<Deck>,
     next: u64,
 }
 
@@ -23,7 +28,7 @@ impl App {
         let mut child = Command::new(env!("CARGO_BIN_EXE_craft-vba")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        App { child, stdin, stdout, book: Book::default(), next: 1 }
+        App { child, stdin, stdout, book: Book::default(), deck: None, next: 1 }
     }
 
     /// Sends a request and answers the add-in's host requests until its reply comes.
@@ -36,7 +41,11 @@ impl App {
             assert!(self.stdout.read_line(&mut line).unwrap() > 0, "the add-in exited");
             let msg: Json = serde_json::from_str(&line).unwrap();
             if let Some(m) = msg.get("method").and_then(Json::as_str) {
-                let reply = match self.book.handle(m, &msg["params"]) {
+                let answer = match &mut self.deck {
+                    Some(d) => d.handle(m, &msg["params"]),
+                    None => self.book.handle(m, &msg["params"]),
+                };
+                let reply = match answer {
                     Ok(result) => json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}),
                     Err((code, message, data)) => json!({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": code, "message": message, "data": data}}),
                 };
@@ -110,4 +119,50 @@ fn macros_are_written_listed_run_recorded_and_removed() {
     writeln!(app.stdin, "{}", json!({"jsonrpc": "2.0", "method": "shutdown"})).unwrap();
     let status = app.child.wait().unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn powerpoint_macros_run_in_deckcraft() {
+    let manifest: Json = serde_json::from_slice(&Command::new(env!("CARGO_BIN_EXE_craft-vba")).arg("--manifest").output().unwrap().stdout).unwrap();
+    assert_eq!(manifest["apps"], json!(["gridcraft", "deckcraft"]));
+
+    let mut app = App::start();
+    app.deck = Some(Deck::default());
+    assert_eq!(app.request("initialize", json!({"protocolVersion": 1, "host": {"id": "deckcraft"}}))["result"]["protocolVersion"], 1);
+    let source = "Sub Build()\r\n\
+                  \x20   Dim s As Slide, sh As Shape\r\n\
+                  \x20   Set s = ActivePresentation.Slides.Add(ActivePresentation.Slides.Count + 1, ppLayoutBlank)\r\n\
+                  \x20   Set sh = s.Shapes.AddShape(msoShapeOval, 10, 20, 100, 50)\r\n\
+                  \x20   sh.Fill.ForeColor.RGB = RGB(255, 0, 0)\r\n\
+                  \x20   sh.TextFrame.TextRange.Text = \"Slide \" & s.SlideIndex\r\n\
+                  \x20   MsgBox ActivePresentation.Slides.Count & \" slides\"\r\n\
+                  End Sub\r\n\
+                  Sub Bad()\r\n    ActivePresentation.Slides(99).Delete\r\nEnd Sub\r\n\
+                  Sub Pressed(control As IRibbonControl)\r\n    ActivePresentation.Slides(1).Shapes(1).TextFrame.TextRange.Text = control.Id & \"/\" & control.Tag\r\nEnd Sub\r\n";
+    assert_eq!(app.request("macros/saveModule", json!({"name": "Module1", "source": source}))["result"], json!({}));
+    let names: Vec<String> =
+        app.request("macros/list", json!({}))["result"]["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["Module1.Build", "Module1.Bad"]);
+
+    assert_eq!(app.request("macros/run", json!({"name": "Build"}))["result"], json!({}));
+    let deck = app.deck.as_ref().unwrap();
+    assert_eq!(deck.slides.len(), 3);
+    let oval = &deck.slides[2].shapes[0];
+    assert_eq!((oval.geometry.as_str(), oval.fill.as_deref(), oval.text.as_str()), ("ellipse", Some("#FF0000"), "Slide 3"));
+    assert_eq!((oval.left, oval.top, oval.width, oval.height), (10.0, 20.0, 100.0, 50.0));
+    assert_eq!(deck.messages, vec![("3 slides".to_string(), None)]);
+
+    let failed = app.request("macros/run", json!({"name": "Bad"}));
+    assert_eq!(failed["error"]["message"], "Run-time error '9': Subscript out of range");
+    assert_eq!(failed["error"]["data"]["number"], 9);
+
+    let control = json!({"id": "deckButton", "tag": "east"});
+    assert_eq!(app.request("macros/run", json!({"name": "Module1.Pressed", "control": control}))["result"], json!({}));
+    assert_eq!(app.deck.as_ref().unwrap().shape(0, "Title 1").text, "deckButton/east");
+
+    let recorded = app.request("macros/record", json!({"steps": []}));
+    assert_eq!(recorded["error"]["message"], "PowerPoint has no macro recorder");
+
+    writeln!(app.stdin, "{}", json!({"jsonrpc": "2.0", "method": "shutdown"})).unwrap();
+    assert!(app.child.wait().unwrap().success());
 }

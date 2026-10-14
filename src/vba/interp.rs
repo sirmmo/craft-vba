@@ -1,6 +1,6 @@
 //! Runs VBA: procedures, variables (ByRef/ByVal), typed declarations, arrays, control flow, `With`,
-//! `On Error`, the `Err` and `Debug` objects, `Collection`, built-in functions, and Excel's
-//! objects (through [`Excel`] and the [`Host`]).
+//! `On Error`, the `Err` and `Debug` objects, `Collection`, built-in functions, and the host
+//! application's objects (through its [`Model`] and the [`Host`]).
 //!
 //! Every statement costs a step: a macro stops after [`MAX_STEPS`] (an endless loop is an error,
 //! never a hang), and calls nest at most [`MAX_DEPTH`] deep.
@@ -15,8 +15,8 @@ use super::ast::*;
 use super::builtins;
 use super::ops;
 use super::value::{Array, Obj, R, Value, VbaError};
-use crate::excel::{Excel, XlObj};
 use crate::host::Host;
+use crate::model::{App, Model};
 
 pub const MAX_STEPS: u64 = 20_000_000;
 pub const MAX_DEPTH: usize = 200;
@@ -180,7 +180,8 @@ impl ArgVal {
 pub struct Interp<'a> {
     prog: &'a Program,
     host: &'a mut dyn Host,
-    pub excel: Excel,
+    /// The host application's objects (Excel's, PowerPoint's).
+    pub model: Model,
     globals: Vec<HashMap<String, Slot>>,
     frames: Vec<Frame>,
     steps: u64,
@@ -198,7 +199,13 @@ fn compile_err(msg: impl Into<String>) -> VbaError {
 }
 
 impl<'a> Interp<'a> {
+    /// An interpreter with Excel's objects.
     pub fn new(prog: &'a Program, host: &'a mut dyn Host) -> Interp<'a> {
+        Interp::for_app(prog, host, App::Excel)
+    }
+
+    /// An interpreter with `app`'s objects.
+    pub fn for_app(prog: &'a Program, host: &'a mut dyn Host, app: App) -> Interp<'a> {
         let mut globals = Vec::new();
         for m in &prog.modules {
             let mut vars = HashMap::new();
@@ -215,7 +222,7 @@ impl<'a> Interp<'a> {
         let mut it = Interp {
             prog,
             host,
-            excel: Excel::default(),
+            model: Model::new(app),
             globals,
             frames: Vec::new(),
             steps: 0,
@@ -285,7 +292,7 @@ impl<'a> Interp<'a> {
     /// Runs a procedure with arguments (a ribbon button's macro gets the button).
     pub fn run_with(&mut self, module: usize, proc: usize, args: Vec<Value>) -> Result<(), Failure> {
         let r = self.call_proc(module, proc, args.into_iter().map(ArgVal::Val).collect(), Vec::new());
-        let flushed = self.excel.flush(self.host);
+        let flushed = self.model.flush(self.host);
         let failure = |me: &Interp, f: Fail| Failure {
             number: if f.err.number == COMPILE { 0 } else { f.err.number },
             message: f.err.description,
@@ -364,7 +371,7 @@ impl<'a> Interp<'a> {
         if let Some((mi, e)) = found {
             return self.const_value(mi, e).map(Some);
         }
-        Ok(builtins::constant(name))
+        Ok(builtins::constant(name).or_else(|| self.model.constant(name)))
     }
 
     /// A module constant's value (constants are literals, other constants and operators).
@@ -440,22 +447,17 @@ impl<'a> Interp<'a> {
         self.prog.modules.iter().position(|m| m.name.eq_ignore_ascii_case(name))
     }
 
-    /// A global object or a name Excel's `Application` answers for (`ActiveSheet`, `Range`).
+    /// A global object: the language's own (`Err`, `Debug`), or one the host's model answers
+    /// for (`Application`, `ActiveSheet`, `Range`, `ActivePresentation`).
     fn global(&mut self, name: &str, args: &[Value]) -> X<Option<Value>> {
-        let obj = |o: XlObj| Some(Value::Object(Obj::Xl(o)));
-        let n = name.to_ascii_lowercase();
-        Ok(match n.as_str() {
-            "application" => obj(XlObj::Application),
-            "err" if args.is_empty() => Some(Value::Object(Obj::Err)),
-            "debug" => Some(Value::Object(Obj::Debug)),
-            "worksheetfunction" => obj(XlObj::WorksheetFunction),
-            "thisworkbook" | "activeworkbook" => obj(XlObj::Workbook),
-            "activesheet" | "activecell" | "selection" | "worksheets" | "sheets" | "range" | "cells" | "rows" | "columns" => {
-                let v = self.excel.member(self.host, &XlObj::Application, name, args, &[]);
-                Some(self.x(v)?)
+        match name.to_ascii_lowercase().as_str() {
+            "err" if args.is_empty() => Ok(Some(Value::Object(Obj::Err))),
+            "debug" => Ok(Some(Value::Object(Obj::Debug))),
+            _ => {
+                let v = self.model.global(self.host, name, args);
+                self.x(v)
             }
-            _ => None,
-        })
+        }
     }
 
     // ------------------------------------------------------------ evaluation
@@ -527,8 +529,8 @@ impl<'a> Interp<'a> {
 
     fn deref(&mut self, v: Value) -> X<Value> {
         match v {
-            Value::Object(Obj::Xl(o)) => {
-                let r = self.excel.default_value(self.host, &o);
+            Value::Object(o) if o.is_host() => {
+                let r = self.model.default_value(self.host, &o);
                 self.x(r)
             }
             Value::Object(Obj::Err) => Ok(Value::Long(self.err.0)),
@@ -684,7 +686,8 @@ impl<'a> Interp<'a> {
     /// Arguments to built-in functions are values: a range becomes its value, but arrays stay.
     fn deref_arg(&mut self, v: Value) -> X<Value> {
         match v {
-            Value::Object(Obj::Xl(XlObj::Range(_))) | Value::Object(Obj::Err) => self.deref(v),
+            Value::Object(ref o) if Model::is_value(o) => self.deref(v),
+            Value::Object(Obj::Err) => self.deref(v),
             other => Ok(other),
         }
     }
@@ -714,7 +717,7 @@ impl<'a> Interp<'a> {
                         o.insert("title".into(), json!(title));
                     }
                 }
-                let flushed = self.excel.flush(self.host);
+                let flushed = self.model.flush(self.host);
                 self.x(flushed)?;
                 let out = self.host.call("host/message", params).map_err(|e| self.fail(VbaError::with(1004, e.message)))?;
                 let result = out.get("result").and_then(serde_json::Value::as_i64).unwrap_or(1);
@@ -726,8 +729,8 @@ impl<'a> Interp<'a> {
 
     fn default_call(&mut self, o: Obj, vals: Vec<Value>) -> X<Value> {
         match o {
-            Obj::Xl(x) => {
-                let r = self.excel.default_call(self.host, &x, &vals);
+            x if x.is_host() => {
+                let r = self.model.default_call(self.host, &x, &vals);
                 self.x(r)
             }
             Obj::Collection(c) => self.collection(&c, "item", vals),
@@ -738,7 +741,7 @@ impl<'a> Interp<'a> {
     fn member(&mut self, o: Value, m: &str, vals: Vec<Value>, named: Vec<(String, Value)>) -> X<Value> {
         let lower = m.to_ascii_lowercase();
         match o {
-            Value::Object(Obj::Xl(XlObj::Application)) if lower == "run" => {
+            Value::Object(ref app) if lower == "run" && Model::is_application(app) => {
                 let name = vals.first().cloned().ok_or_else(|| self.fail(VbaError::new(449)))?;
                 let name = self.x(name.to_str())?;
                 let target = match name.rsplit_once('!') {
@@ -761,9 +764,9 @@ impl<'a> Interp<'a> {
                 let args = vals.into_iter().skip(1).map(ArgVal::Val).collect();
                 self.call_proc(mi, pi, args, Vec::new())
             }
-            Value::Object(Obj::Xl(x)) => {
+            Value::Object(x) if x.is_host() => {
                 let vals = vals.into_iter().map(|v| self.deref_arg(v)).collect::<X<Vec<_>>>()?;
-                let r = self.excel.member(self.host, &x, m, &vals, &named);
+                let r = self.model.member(self.host, &x, m, &vals, &named);
                 self.x(r)
             }
             Value::Object(Obj::Err) => match lower.as_str() {
@@ -903,8 +906,11 @@ impl<'a> Interp<'a> {
                 let s = self.var(n)?;
                 // `rng = 5` with rng a Range sets its value (the default member).
                 let current = s.borrow().value.clone();
-                if !set && let Value::Object(Obj::Xl(o)) = current {
-                    let r = self.excel.assign(self.host, &o, "value", &[], &v);
+                if !set
+                    && let Value::Object(o) = current
+                    && o.is_host()
+                {
+                    let r = self.model.assign_default(self.host, &o, &v);
                     return self.x(r);
                 }
                 self.store(&s, v, set)
@@ -924,8 +930,8 @@ impl<'a> Interp<'a> {
                                     let r = a.borrow_mut().set(&idx, v);
                                     self.x(r)
                                 }
-                                Value::Object(Obj::Xl(o)) => {
-                                    let r = self.excel.assign(self.host, &o, "item", &vals, &v);
+                                Value::Object(o) if o.is_host() => {
+                                    let r = self.model.assign(self.host, &o, "item", &vals, &v);
                                     self.x(r)
                                 }
                                 _ => Err(self.fail(VbaError::new(13))),
@@ -933,7 +939,7 @@ impl<'a> Interp<'a> {
                         }
                         // `Range("A1") = 5`, `Cells(1, 1) = 5`.
                         let vals = vals.into_iter().map(|v| self.deref_arg(v)).collect::<X<Vec<_>>>()?;
-                        let r = self.excel.assign(self.host, &XlObj::Application, n, &vals, &v);
+                        let r = self.model.assign_global(self.host, n, &vals, &v);
                         self.x(r)
                     }
                     Expr::Member(obj, m) => {
@@ -971,14 +977,14 @@ impl<'a> Interp<'a> {
 
     fn member_assign(&mut self, o: Value, m: &str, args: Vec<Value>, v: Value) -> X<()> {
         match o {
-            Value::Object(Obj::Xl(x)) => {
+            Value::Object(x) if x.is_host() => {
                 let args = args.into_iter().map(|a| self.deref_arg(a)).collect::<X<Vec<_>>>()?;
                 // A value assigned to a range property is the other range's value (`a.Value = b`).
                 let v = match v {
-                    Value::Object(Obj::Xl(XlObj::Range(_))) => self.deref(v)?,
+                    Value::Object(ref o) if Model::is_value(o) => self.deref(v)?,
                     other => other,
                 };
-                let r = self.excel.assign(self.host, &x, m, &args, &v);
+                let r = self.model.assign(self.host, &x, m, &args, &v);
                 self.x(r)
             }
             Value::Object(Obj::Err) => match m.to_ascii_lowercase().as_str() {
@@ -1381,8 +1387,8 @@ impl<'a> Interp<'a> {
                 let c = self.eval(collection)?;
                 let items: Vec<Value> = match c {
                     Value::Array(a) => a.borrow().data.clone(),
-                    Value::Object(Obj::Xl(o)) => {
-                        let r = self.excel.items(self.host, &o);
+                    Value::Object(o) if o.is_host() => {
+                        let r = self.model.items(self.host, &o);
                         self.x(r)?
                     }
                     Value::Object(Obj::Collection(c)) => c.borrow().iter().map(|(_, v)| v.clone()).collect(),

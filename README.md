@@ -1,13 +1,16 @@
 # craft-vba
 
-VBA macros for the craft apps (GridCraft first), as an add-in that runs in its own process. The
-app draws the Developer tab (Visual Basic, Macros, Record Macro); craft-vba does the language:
+VBA macros for the craft apps (GridCraft and DeckCraft), as an add-in that runs in its own
+process. The app draws the Developer tab (Visual Basic, Macros, Record Macro); craft-vba does the
+language:
 
-- reads and writes the workbook's VBA project (`vbaProject.bin`, [MS-OVBA]);
+- reads and writes the document's VBA project (`vbaProject.bin`, [MS-OVBA]);
 - runs its macros with an interpreter for VBA ([MS-VBAL]);
-- reaches Excel's objects (`Range`, `Cells`, `Worksheets`, …) through the app's `host/sync`,
-  the same object paths as the Office add-ins' bridge;
-- records the app's commands as a VBA Sub.
+- reaches the app's objects through its `host/sync`, the same object paths as the Office
+  add-ins' bridge: Excel's (`Range`, `Cells`, `Worksheets`, …) in GridCraft, PowerPoint's
+  (`ActivePresentation`, `Slides`, `Shapes`, …) in DeckCraft, chosen by `initialize`'s `host.id`
+  (`deckcraft` gets PowerPoint's, every other app Excel's);
+- records GridCraft's commands as a VBA Sub.
 
 It speaks the craft plugin protocol (JSON-RPC 2.0 over standard input and output, one message per
 line), version 1.1. Everything comes from the published specifications and public documentation
@@ -44,7 +47,7 @@ The app asks (besides `initialize`):
 | `macros/modules {}` | `{"modules": [{"name", "kind": "standard"\|"class"\|"document", "source"}]}` |
 | `macros/saveModule {"name", "source"}` | `{}` (or `{"compileError": {"line", "message"}}`: saved anyway); creates the project when there's none |
 | `macros/deleteModule {"name"}` | `{}` |
-| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` |
+| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` (in DeckCraft an error: PowerPoint has no macro recorder) |
 
 While the app waits for an answer, craft-vba asks it:
 
@@ -97,11 +100,50 @@ parameters runs as it is. Such callbacks aren't in `macros/list`, as in Excel's 
   `Context`). Colours are VBA's numbers
   (`RGB(255, 0, 0)` is red).
 
+### PowerPoint (DeckCraft)
+
+- `Application` (`ActivePresentation`, `ActiveWindow`, `Presentations`, `Name`, `Version`,
+  `Run`), `Presentation` (`Slides`, `Name`).
+- `Slides` (`Count`, `Item`/`(i)`, `Add(Index, ppLayout…)`, `FindBySlideID`, `For Each`),
+  `Slide` (`SlideIndex`, `SlideNumber`, `SlideID`, `Shapes`, `Layout`, `CustomLayout.Name`,
+  `Delete`, `Select`).
+- `Shapes` (`Count`, `Item`/`(i)` by number or name, `AddTextbox`, `AddShape`, `AddLine`,
+  `For Each`), `Shape` (`Name`, `Left`, `Top`, `Width`, `Height`, `Id`, `Type`, `HasTextFrame`,
+  `TextFrame`, `Fill`, `Line`, `Select [Replace]`, `Delete`).
+- `TextFrame` (`TextRange`, `HasText`, `WordWrap`, `AutoSize`), `TextRange` (`Text` (paragraphs
+  end with `vbCr`, as in PowerPoint), `Length`, `Start`, `InsertAfter`, `InsertBefore`, `Font`),
+  `Font` (`Bold`, `Italic`, `Underline`, `Size`, `Name`, `Color`), `ColorFormat` (`RGB`, `Type`),
+  `FillFormat` (`ForeColor`, `Visible`, `Transparency`, `Solid`), `LineFormat` (`ForeColor`,
+  `Weight`, `Visible`).
+- `ActiveWindow.Selection` (`Type`, `ShapeRange`, `SlideRange`; a range of one shape or slide
+  answers for it, `Left`/`Top`/`Width`/`Height` and `Delete` apply to all its shapes),
+  `ActiveWindow.View` (`GotoSlide`, `Slide`), `IRibbonControl`.
+- `AddShape` draws `msoShapeRectangle`, `msoShapeRoundedRectangle`, `msoShapeOval`,
+  `msoShapeIsoscelesTriangle`, `msoShapeRightTriangle`, `msoShapeDiamond`,
+  `msoShapeParallelogram`, `msoShapeTrapezoid`, `msoShapeOctagon`, `msoShapeHexagon`,
+  `msoShapeRegularPentagon`, `msoShapeCross`, `msoShapeCan`, `msoShapeCube`, `msoShapeBevel`,
+  `msoShapeFoldedCorner`, `msoShapeSmileyFace`, `msoShapeDonut`, `msoShapeNoSymbol`,
+  `msoShapeBlockArc`, `msoShapeHeart`, `msoShapeLightningBolt`, `msoShapeSun`, `msoShapeMoon`,
+  the arrows (`Right`, `Left`, `Up`, `Down`, `LeftRight`, `UpDown`), `msoShapePentagon`,
+  `msoShapeChevron`, `msoShapeFlowchartProcess` and the 4, 5, 8, 16, 24 and 32-point stars.
+- Constants: `msoTrue`/`msoFalse`/`msoTriStateToggle`, `msoTextOrientation…`, `msoShape…`,
+  shape types (`msoAutoShape`, `msoTextBox`, …), `ppLayout…`, `ppSelection…`, `ppAutoSize…`.
+- Tri-states read as `msoTrue` (-1), `msoFalse` (0) or `msoTriStateMixed` (-2); colours are
+  VBA's numbers. `Slides(99)` is run-time error 9, as a missing slide or shape is.
+
 A macro is one undo step in the app. Reads are cached (a sheet's used range is read once), writes
 are sent in batches.
 
 ## Limits
 
+- PowerPoint: not yet tables, pictures, groups, placeholders by type, `Characters`/`Paragraphs`/
+  `Runs` (text formatting applies to a shape's whole text), `Rotation`, `ZOrder`, `Duplicate`,
+  `Copy`/`Paste`, animations, slide shows, `Shapes.Range`, notes, `TextFrame2`, `DashStyle`;
+  `AddTextbox` makes horizontal text only; `AddLine` keeps the line's box but not its direction
+  (a line from bottom-left to top-right is drawn top-left to bottom-right); `Slides.Add` finds
+  the layout by its standard name (Title Slide, Title and Content, Blank, …) in the first
+  master's layouts and uses the app's default layout when it can't; several selected shapes
+  answer only the members listed above.
 - Not yet: class modules (`New Class1`), `Type`, `Property Let/Set`, `GoSub`, `Resume` without a
   label, `InputBox`, UserForms, events (`Workbook_Open`, `Worksheet_Change`), `Declare` (Windows
   API calls), `CreateObject` (COM), `Shell`, file I/O, date literals (`#1/2/2026#`), `Like` is
