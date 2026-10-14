@@ -43,7 +43,7 @@ pub fn utf16le(text: &str) -> Vec<u8> {
 }
 
 pub fn from_utf16le(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0)])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p)).collect();
     String::from_utf16_lossy(&units)
 }
 
