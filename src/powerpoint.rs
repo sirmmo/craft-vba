@@ -771,6 +771,16 @@ impl PowerPoint {
                 let (x2, y2) = (finite(need(args, named, 2, "endx")?)?, finite(need(args, named, 3, "endy")?)?);
                 self.add_shape(host, s, "addLine", json!("straight"), (x1.min(x2), y1.min(y2), (x2 - x1).abs(), (y2 - y1).abs()))
             }
+            (PpObj::Shapes(s), "findbyid") => {
+                let want = need(args, named, 0, "id")?.to_str()?;
+                let id = self
+                    .shape_list(host, s)?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .find(|i| **i == *want.trim())
+                    .ok_or_else(|| VbaError::with(9, format!("Shapes.FindById: no shape {want} on this slide")))?;
+                obj(PpObj::Shape(ShapeRef { slide: Some(s.clone()), id }))
+            }
             (PpObj::Shapes(s), "parent") => obj(PpObj::Slide(s.clone())),
 
             // A shape.
@@ -808,6 +818,16 @@ impl PowerPoint {
                 }
                 let ids: Vec<&str> = ids.iter().map(|i| i.as_ref()).collect();
                 self.now(host, slide_path(s), "setSelectedShapes", json!([ids]))?;
+                Ok(Value::Empty)
+            }
+            (PpObj::Shape(r), p @ ("incrementleft" | "incrementtop")) => {
+                let by = finite(need(args, named, 0, "increment")?)?;
+                let prop = if p == "incrementleft" { "left" } else { "top" };
+                let v = self.shape_prop(host, r, Part::Shape, prop)?.as_f64().unwrap_or(0.0) + by;
+                if !v.is_finite() {
+                    return Err(VbaError::new(6));
+                }
+                self.set(host, r, Part::Shape, prop, json!(v))?;
                 Ok(Value::Empty)
             }
             (PpObj::Shape(r), "parent") => match &r.slide {
@@ -913,6 +933,23 @@ impl PowerPoint {
                 let range = PpObj::SlideRange(slides.into());
                 if args.is_empty() { obj(range) } else { self.member(host, &range, "item", args, named) }
             }
+            (PpObj::Selection, "textrange") => match self.selected_shapes(host)?.as_slice() {
+                [one] => {
+                    if !self.has_text_frame(host, one)? {
+                        return Err(VbaError::with(5, "The selected shape has no text frame"));
+                    }
+                    obj(PpObj::TextRange(one.clone()))
+                }
+                [] => Err(VbaError::with(91, "Nothing appropriate is currently selected (no shapes are selected)")),
+                _ => Err(VbaError::with(438, "Selection.TextRange with several shapes selected isn't supported yet (use ShapeRange(i))")),
+            },
+            (PpObj::Selection, "unselect") => {
+                let (slides, shapes) = self.selection(host)?;
+                if let (Some(s), false) = (slides.first(), shapes.is_empty()) {
+                    self.now(host, slide_path(s), "setSelectedShapes", json!([Vec::<&str>::new()]))?;
+                }
+                Ok(Value::Empty)
+            }
             (PpObj::Selection, "type") => {
                 let (slides, shapes) = self.selection(host)?;
                 Ok(Value::Long(if !shapes.is_empty() {
@@ -949,6 +986,12 @@ impl PowerPoint {
                 }
                 Ok(Value::Empty)
             }
+            (PpObj::ShapeRange(shapes), "incrementleft" | "incrementtop") if shapes.len() > 1 => {
+                for r in shapes.iter() {
+                    self.member(host, &PpObj::Shape(r.clone()), name, args, named)?;
+                }
+                Ok(Value::Empty)
+            }
             (PpObj::ShapeRange(shapes), _) => match shapes.as_ref() {
                 [one] => self.member(host, &PpObj::Shape(one.clone()), name, args, named),
                 [] => Err(VbaError::with(91, "Nothing appropriate is currently selected (no shapes are selected)")),
@@ -958,6 +1001,12 @@ impl PowerPoint {
             (PpObj::SlideRange(slides), "item") => {
                 let i = position(need(args, named, 0, "index")?, slides.len())?;
                 obj(PpObj::Slide(slides.get(i).cloned().ok_or(VbaError::new(9))?))
+            }
+            (PpObj::SlideRange(slides), "delete") if slides.len() > 1 => {
+                for s in slides.iter() {
+                    self.now(host, slide_path(s), "delete", json!([]))?;
+                }
+                Ok(Value::Empty)
             }
             (PpObj::SlideRange(slides), _) => match slides.as_ref() {
                 [one] => self.member(host, &PpObj::Slide(one.clone()), name, args, named),

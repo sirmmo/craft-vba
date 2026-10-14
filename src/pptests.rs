@@ -331,6 +331,13 @@ fn every_member_survives_odd_arguments() {
         "Slides(1).Layout",
         "Slides(1).Shapes(1).TextFrame.AutoSize",
         "Slides(1).Shapes(1).TextFrame.TextRange.Start",
+        "Slides(1).Shapes.FindById",
+        "Slides(1).Shapes(1).IncrementLeft",
+        "Slides(1).Shapes(1).IncrementTop",
+        "Windows.Selection.TextRange.Text",
+        "Windows.Selection.Unselect",
+        "Windows.Selection.ShapeRange.IncrementLeft",
+        "Windows.Selection.SlideRange.Delete",
     ];
     for m in members {
         for args in ["", " 1e300", " \"x\"", " -1, -1, -1, -1, -1", " 1, 1e308, 1, 1, 1"] {
@@ -339,4 +346,106 @@ fn every_member_survives_odd_arguments() {
             let _ = run_in(Deck::default(), &src);
         }
     }
+}
+
+#[test]
+fn recorded_deckcraft_steps_run_back() {
+    use serde_json::json;
+    let steps = [
+        json!({"command": "slide.new", "params": {}}),
+        json!({"command": "slide.new", "params": {"layout": "blank"}}),
+        json!({"command": "shape.insert", "params": {"preset": "ellipse", "rect": [10, 20, 100, 50], "text": "Hi"}}),
+        json!({"command": "format.bold", "params": {"on": true}}),
+        json!({"command": "format.italic", "params": {}}),
+        json!({"command": "format.underline", "params": {"on": true}}),
+        json!({"command": "format.size", "params": {"size": 24}}),
+        json!({"command": "format.font", "params": {"family": "Georgia"}}),
+        json!({"command": "format.color", "params": {"color": "#FF0000"}}),
+        json!({"command": "text.edit", "params": {}}),
+        json!({"command": "text.insert", "params": {"text": "!"}}),
+        json!({"command": "text.insert", "params": {"text": "\nnext"}}),
+        json!({"command": "text.exit", "params": {}}),
+        json!({"command": "shape.fill", "params": {"color": "#00FF00", "transparency": 0.5}}),
+        json!({"command": "shape.line", "params": {"width": 3, "color": "#010203"}}),
+        json!({"command": "shape.move", "params": {"dx": 5, "dy": -10}}),
+        json!({"command": "arrange.nudge", "params": {"dx": 1, "dy": 0}}),
+        json!({"command": "shape.resize", "params": {"w": 200, "lockAspect": true}}),
+        json!({"command": "shape.rename", "params": {"name": "Sun"}}),
+        json!({"command": "insert.textBox", "params": {"rect": [0, 0, 300, 40], "text": "Box"}}),
+        json!({"command": "shape.setBounds", "params": {"x": 1, "y": 2, "w": 30, "h": 40}}),
+        json!({"command": "edit.deselect", "params": {}}),
+        json!({"command": "slide.go", "params": {"index": 0}}),
+        json!({"command": "selection.select", "params": {"id": 261}}),
+        json!({"command": "text.set", "params": {"text": "Replaced"}}),
+        json!({"command": "shape.fill", "params": {"none": true, "ids": [260]}}),
+        json!({"command": "edit.select", "params": {"ids": [260, 261]}}),
+        json!({"command": "shape.move", "params": {"dx": 7}}),
+        json!({"command": "edit.delete", "params": {"ids": [260]}}),
+        json!({"command": "transition.apply", "params": {"kind": "fade"}}),
+        json!({"command": "slide.next", "params": {}}),
+        json!({"command": "slide.last", "params": {}}),
+        json!({"command": "slide.next", "params": {}}),
+        json!({"command": "slide.delete", "params": {}}),
+        json!({"command": "slide.first", "params": {}}),
+    ];
+    let src = crate::record::record_powerpoint("Main", &steps);
+    assert!(src.contains("    ' (step not recorded: transition.apply)\r\n"), "{src}");
+    let (r, d) = run_in(Deck::default(), &src);
+    if let Err(f) = r {
+        panic!("{} (line {})\n{src}", f.text(), f.line);
+    }
+    // Slide 1, the new Title and Content slide (after a title slide), then the blank one; the
+    // last slide (the old blank one) was deleted.
+    assert_eq!(d.slides.iter().map(|s| (s.id, s.layout)).collect::<Vec<_>>(), [(256, 2147483649), (300, 2147483650), (301, 2147483655)]);
+    let sun = d.shape(2, "Sun");
+    assert_eq!(sun.geometry, "ellipse");
+    assert_eq!((sun.left, sun.top, sun.width, sun.height), (16.0, 10.0, 200.0, 100.0));
+    assert_eq!(sun.text, "Hi!\nnext");
+    assert!(sun.bold && sun.italic && sun.underline);
+    assert_eq!((sun.size, sun.font.as_str(), sun.color.as_str()), (24.0, "Georgia", "#FF0000"));
+    assert_eq!((sun.fill.as_deref(), sun.transparency, sun.line_weight, sun.line_color.as_str()), (Some("#00FF00"), 0.5, 3.0, "#010203"));
+    let boxed = &d.slides[2].shapes[1];
+    assert_eq!((boxed.kind.as_str(), boxed.text.as_str()), ("textBox", "Box"));
+    assert_eq!((boxed.left, boxed.top, boxed.width, boxed.height), (1.0, 2.0, 30.0, 40.0));
+    let first = &d.slides[0].shapes;
+    assert_eq!(first.len(), 1, "Title 1 was deleted");
+    assert_eq!((first[0].name.as_str(), first[0].text.as_str(), first[0].left), ("Subtitle 2", "Replaced", 7.0));
+    assert_eq!(d.selected_slides, [256], "slide.first went back");
+}
+
+#[test]
+fn the_recorders_extras_in_the_model() {
+    let deck = Deck { selected_slides: vec![256], selected_shapes: vec![260, 261], ..Deck::default() };
+    let (r, d) = run_in(
+        deck,
+        r#"
+Sub Main()
+    With ActiveWindow.Selection.ShapeRange
+        .IncrementLeft 10
+        .IncrementTop -5
+    End With
+    Debug.Print ActivePresentation.Slides(1).Shapes.FindById(261).Name; ActivePresentation.Slides(1).Shapes.FindById("260").Left
+    ActivePresentation.Slides(1).Shapes.FindById(261).Select
+    ActiveWindow.Selection.TextRange.Font.Bold = msoTrue
+    Debug.Print ActiveWindow.Selection.TextRange.Text = "First line" & vbCr & "Second line"
+    ActiveWindow.Selection.Unselect
+    Debug.Print ActiveWindow.Selection.Type
+    ActiveWindow.Selection.Unselect
+    ActivePresentation.Slides(1).Select
+End Sub"#,
+    );
+    r.unwrap();
+    assert_eq!(d.logs, ["Subtitle 2 10", "True", "1"]);
+    let s = d.shape(0, "Subtitle 2");
+    assert_eq!((s.left, s.top), (10.0, 115.0));
+    assert!(s.bold);
+    assert_eq!(fails("Sub Main()\r\n    ActivePresentation.Slides(1).Shapes.FindById(999).Select\r\nEnd Sub").number, 9);
+    assert_eq!(fails("Sub Main()\r\n    ActiveWindow.Selection.TextRange.Text = \"x\"\r\nEnd Sub").number, 91);
+    let two = Deck { selected_shapes: vec![260, 261], ..Deck::default() };
+    assert_eq!(run_in(two, "Sub Main()\r\n    ActiveWindow.Selection.TextRange.Text = \"x\"\r\nEnd Sub").0.unwrap_err().number, 438);
+    // Several slides selected are deleted together.
+    let both = Deck { selected_slides: vec![256, 257], ..Deck::default() };
+    let (r, d) = run_in(both, "Sub Main()\r\n    ActivePresentation.Slides.Add 3, ppLayoutBlank\r\n    ActiveWindow.Selection.SlideRange.Delete\r\nEnd Sub");
+    r.unwrap();
+    assert_eq!(d.slides.iter().map(|s| s.id).collect::<Vec<_>>(), [300]);
 }

@@ -11,7 +11,8 @@ language:
   (`ActivePresentation`, `Slides`, `Shapes`, …) in DeckCraft, Word's (`ActiveDocument`,
   `Paragraphs`, `Selection`, …) in WordCraft, chosen by `initialize`'s `host.id` (`deckcraft`
   gets PowerPoint's, `wordcraft` Word's, every other app Excel's);
-- records GridCraft's and WordCraft's commands as a VBA Sub.
+- records GridCraft's, WordCraft's and DeckCraft's commands as a VBA Sub (DeckCraft's is a craft
+  extra: PowerPoint itself has had no macro recorder since 2007).
 
 It speaks the craft plugin protocol (JSON-RPC 2.0 over standard input and output, one message per
 line), version 1.1. Everything comes from the published specifications and public documentation
@@ -48,7 +49,7 @@ The app asks (besides `initialize`):
 | `macros/modules {}` | `{"modules": [{"name", "kind": "standard"\|"class"\|"document", "source"}]}` |
 | `macros/saveModule {"name", "source"}` | `{}` (or `{"compileError": {"line", "message"}}`: saved anyway); creates the project when there's none |
 | `macros/deleteModule {"name"}` | `{}` |
-| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` (Excel's objects in GridCraft, Word's in WordCraft; in DeckCraft an error: PowerPoint has no macro recorder) |
+| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` (Excel's objects in GridCraft, Word's in WordCraft, PowerPoint's in DeckCraft) |
 
 While the app waits for an answer, craft-vba asks it:
 
@@ -116,8 +117,11 @@ parameters runs as it is. Such callbacks aren't in `macros/list`, as in Excel's 
   `Font` (`Bold`, `Italic`, `Underline`, `Size`, `Name`, `Color`), `ColorFormat` (`RGB`, `Type`),
   `FillFormat` (`ForeColor`, `Visible`, `Transparency`, `Solid`), `LineFormat` (`ForeColor`,
   `Weight`, `Visible`).
-- `ActiveWindow.Selection` (`Type`, `ShapeRange`, `SlideRange`; a range of one shape or slide
-  answers for it, `Left`/`Top`/`Width`/`Height` and `Delete` apply to all its shapes),
+- `Shapes.FindById`, `Shape.IncrementLeft`/`IncrementTop`.
+- `ActiveWindow.Selection` (`Type`, `ShapeRange`, `SlideRange`, `TextRange` (the one selected
+  shape's text), `Unselect`; a range of one shape or slide answers for it, `Left`/`Top`/`Width`/
+  `Height`, `IncrementLeft`/`IncrementTop` and `Delete` apply to all its shapes, `SlideRange.Delete`
+  to all its slides),
   `ActiveWindow.View` (`GotoSlide`, `Slide`), `IRibbonControl`.
 - `AddShape` draws `msoShapeRectangle`, `msoShapeRoundedRectangle`, `msoShapeOval`,
   `msoShapeIsoscelesTriangle`, `msoShapeRightTriangle`, `msoShapeDiamond`,
@@ -127,6 +131,28 @@ parameters runs as it is. Such callbacks aren't in `macros/list`, as in Excel's 
   `msoShapeBlockArc`, `msoShapeHeart`, `msoShapeLightningBolt`, `msoShapeSun`, `msoShapeMoon`,
   the arrows (`Right`, `Left`, `Up`, `Down`, `LeftRight`, `UpDown`), `msoShapePentagon`,
   `msoShapeChevron`, `msoShapeFlowchartProcess` and the 4, 5, 8, 16, 24 and 32-point stars.
+- The recorder is a craft extra (PowerPoint has none): it writes DeckCraft's steps as
+  PowerPoint VBA that craft-vba runs back. Indexes in the steps are 0-based, slides in VBA
+  1-based; shapes are found by their id on the slide showing, or are the selection.
+  `slide.new` → `ActiveWindow.View.GotoSlide ActivePresentation.Slides.Add(i, ppLayout…).SlideIndex`
+  (after the current slide by default, with the layout PowerPoint would pick; `title`/`body` set
+  `Shapes(1)`/`Shapes(2)`'s text), `slide.delete` → `Slides(i).Delete`,
+  `Slides.FindBySlideID(id).Delete` or `Selection.SlideRange.Delete`, `slide.go`/`next`/
+  `previous`/`first`/`last` → `ActiveWindow.View.GotoSlide …`, `slide.selectSlides` (one
+  slide) → `Slides(i).Select`, `insert.textBox` → `Shapes.AddTextbox(…).Select`, `shape.insert`
+  → `Shapes.AddShape(msoShape…, …).Select` (or `AddLine`), then the text through
+  `Selection.TextRange.Text`, `text.insert` → `Selection.TextRange.InsertAfter` (typing in a row
+  is one line), `text.set` → `….TextFrame.TextRange.Text`, `format.bold`/`italic`/`underline` →
+  `Selection.TextRange.Font.Bold = msoTrue|msoFalse|msoTriStateToggle`, `format.size`/`font`/
+  `color` → `….Font.Size`/`Name`/`Color.RGB`, `shape.fill` → `….Fill.ForeColor.RGB`,
+  `Fill.Visible = msoFalse`, `Fill.Transparency`, `shape.line` → `….Line.ForeColor.RGB`,
+  `Line.Visible`, `Line.Weight`, `shape.move`/`arrange.nudge` → `IncrementLeft`/`IncrementTop`
+  (or `Left`/`Top`), `shape.resize`/`shape.setBounds` → `Left`/`Top`/`Width`/`Height`,
+  `shape.rename` → `Name`, `edit.select`/`selection.select` →
+  `Shapes.FindById(id).Select [msoFalse]`, `edit.deselect` → `Selection.Unselect`,
+  `edit.delete` → `….Delete`; `text.edit`/`text.exit` write nothing; any other step becomes a
+  comment (`' (step not recorded: transition.apply)`), as do theme colours and presets craft-vba
+  can't draw.
 - Constants: `msoTrue`/`msoFalse`/`msoTriStateToggle`, `msoTextOrientation…`, `msoShape…`,
   shape types (`msoAutoShape`, `msoTextBox`, …), `ppLayout…`, `ppSelection…`, `ppAutoSize…`.
 - Tri-states read as `msoTrue` (-1), `msoFalse` (0) or `msoTriStateMixed` (-2); colours are
@@ -185,7 +211,9 @@ are sent in batches.
   (a line from bottom-left to top-right is drawn top-left to bottom-right); `Slides.Add` finds
   the layout by its standard name (Title Slide, Title and Content, Blank, …) in the first
   master's layouts and uses the app's default layout when it can't; several selected shapes
-  answer only the members listed above.
+  answer only the members listed above (so a recorded format step replays on one selected
+  shape, not several); `Selection.TextRange` is the selected shape's whole text, not the text
+  selected in it (a recorded `text.insert` adds at the end of the text).
 - Word: not yet character positions (`Range.Start`/`End`, `Document.Range(Start, End)` other
   than `(0, 0)`, `Characters`, `Words`, `Sentences`, `Selection.MoveLeft` and friends,
   `HomeKey`/`EndKey` other than `wdStory`), `Find`, tables, fields, bookmarks, lists, sections,

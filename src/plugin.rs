@@ -226,7 +226,6 @@ pub fn handle(app: &mut App, host: &mut dyn Host, method: &str, params: &Json) -
             save(host, &p)?;
             Ok(json!({}))
         }
-        "macros/record" if *app == App::PowerPoint => Err(fail("PowerPoint has no macro recorder")),
         "macros/record" => {
             let steps = params.get("steps").and_then(Json::as_array).cloned().unwrap_or_default();
             let name = params
@@ -234,7 +233,11 @@ pub fn handle(app: &mut App, host: &mut dyn Host, method: &str, params: &Json) -
                 .and_then(Json::as_str)
                 .filter(|n| n.chars().next().is_some_and(char::is_alphabetic) && n.chars().all(|c| c.is_alphanumeric() || c == '_'))
                 .unwrap_or("Macro1");
-            let source = if *app == App::Word { crate::record::record_word(name, &steps) } else { crate::record::record(name, &steps) };
+            let source = match *app {
+                App::Word => crate::record::record_word(name, &steps),
+                App::PowerPoint => crate::record::record_powerpoint(name, &steps),
+                App::Excel => crate::record::record(name, &steps),
+            };
             Ok(json!({"source": source}))
         }
         other => Err((-32601, format!("unknown method {other}"), Json::Null)),

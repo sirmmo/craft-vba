@@ -128,7 +128,7 @@ fn macros_are_written_listed_run_recorded_and_removed() {
 }
 
 #[test]
-fn powerpoint_macros_run_in_deckcraft() {
+fn powerpoint_macros_run_and_record_in_deckcraft() {
     let manifest: Json = serde_json::from_slice(&Command::new(env!("CARGO_BIN_EXE_craft-vba")).arg("--manifest").output().unwrap().stdout).unwrap();
     assert_eq!(manifest["apps"], json!(["gridcraft", "deckcraft", "wordcraft"]));
 
@@ -166,8 +166,27 @@ fn powerpoint_macros_run_in_deckcraft() {
     assert_eq!(app.request("macros/run", json!({"name": "Module1.Pressed", "control": control}))["result"], json!({}));
     assert_eq!(app.deck.as_ref().unwrap().shape(0, "Title 1").text, "deckButton/east");
 
-    let recorded = app.request("macros/record", json!({"steps": []}));
-    assert_eq!(recorded["error"]["message"], "PowerPoint has no macro recorder");
+    // The recorder writes DeckCraft's steps as PowerPoint VBA (a craft extra), and what it writes runs.
+    let steps = json!([
+        {"command": "slide.go", "params": {"index": 0}},
+        {"command": "shape.insert", "params": {"preset": "roundRect", "rect": [5, 6, 70, 80], "text": "Go"}},
+        {"command": "format.bold", "params": {"on": true}},
+        {"command": "shape.fill", "params": {"color": "#0000FF"}},
+        {"command": "transition.apply", "params": {}}
+    ]);
+    let recorded = app.request("macros/record", json!({"steps": steps, "name": "Drawn"}));
+    let src = recorded["result"]["source"].as_str().unwrap().to_string();
+    assert_eq!(
+        src,
+        "Sub Drawn()\r\n    ActiveWindow.View.GotoSlide 1\r\n    \
+         ActiveWindow.View.Slide.Shapes.AddShape(msoShapeRoundedRectangle, 5, 6, 70, 80).Select\r\n    \
+         ActiveWindow.Selection.TextRange.Text = \"Go\"\r\n    ActiveWindow.Selection.TextRange.Font.Bold = msoTrue\r\n    \
+         ActiveWindow.Selection.ShapeRange.Fill.ForeColor.RGB = RGB(0, 0, 255)\r\n    ' (step not recorded: transition.apply)\r\nEnd Sub\r\n"
+    );
+    assert_eq!(app.request("macros/saveModule", json!({"name": "Recorded", "source": src}))["result"], json!({}));
+    assert_eq!(app.request("macros/run", json!({"name": "Drawn"}))["result"], json!({}));
+    let drawn = app.deck.as_ref().unwrap().slides[0].shapes.last().cloned().unwrap();
+    assert_eq!((drawn.geometry.as_str(), drawn.text.as_str(), drawn.bold, drawn.fill.as_deref()), ("roundRectangle", "Go", true, Some("#0000FF")));
 
     writeln!(app.stdin, "{}", json!({"jsonrpc": "2.0", "method": "shutdown"})).unwrap();
     assert!(app.child.wait().unwrap().success());
