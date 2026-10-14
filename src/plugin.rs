@@ -8,9 +8,11 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value as Json, json};
 
+use crate::excel::XlObj;
 use crate::host::{Host, HostError};
 use crate::ovba::{ModuleKind, Project};
 use crate::vba::ast::ProcKind;
+use crate::vba::value::{Obj, Value};
 use crate::vba::{Interp, Program};
 
 /// Longest line read (a large project in base64 fits).
@@ -174,7 +176,16 @@ pub fn handle(host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, 
             let prog = program(&p);
             let mut it = Interp::new(&prog, host);
             let (m, pr) = it.find(name).map_err(fail)?;
-            match it.run(m, pr) {
+            // From a ribbon button: Excel passes the button (`Sub Go(control As IRibbonControl)`);
+            // a macro without parameters runs as it is.
+            let mut args = Vec::new();
+            if let Some(c) = params.get("control").filter(|c| c.is_object())
+                && it.param_count(m, pr) > 0
+            {
+                let text = |k: &str| -> std::rc::Rc<str> { c.get(k).and_then(Json::as_str).unwrap_or("").into() };
+                args.push(Value::Object(Obj::Xl(XlObj::RibbonControl { id: text("id"), tag: text("tag") })));
+            }
+            match it.run_with(m, pr, args) {
                 Ok(()) => Ok(json!({})),
                 Err(f) => Err((1, f.text(), json!({"module": f.module, "line": f.line, "number": f.number, "compile": f.compile}))),
             }

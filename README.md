@@ -40,7 +40,7 @@ The app asks (besides `initialize`):
 | Request | Answer |
 |---|---|
 | `macros/list {}` | `{"macros": [{"name": "Module1.Hello", "module", "procedure"}]}`: public Subs without required parameters, of standard and document modules |
-| `macros/run {"name": "Module1.Hello" \| "Hello"}` | `{}`, or an error `{"code": 1, "message": "Run-time error '13': Type mismatch", "data": {"module", "line", "number", "compile"}}` |
+| `macros/run {"name": "Module1.Hello" \| "Hello", "control"?: {"id", "tag"}}` | `{}`, or an error `{"code": 1, "message": "Run-time error '13': Type mismatch", "data": {"module", "line", "number", "compile"}}` |
 | `macros/modules {}` | `{"modules": [{"name", "kind": "standard"\|"class"\|"document", "source"}]}` |
 | `macros/saveModule {"name", "source"}` | `{}` (or `{"compileError": {"line", "message"}}`: saved anyway); creates the project when there's none |
 | `macros/deleteModule {"name"}` | `{}` |
@@ -57,6 +57,10 @@ While the app waits for an answer, craft-vba asks it:
 | `host/log {"text"}` | `{}` (Debug.Print) |
 
 Line numbers count the module's stored source, its `Attribute VB_Name` line included.
+
+`control` is the ribbon button that ran the macro: a Sub with a parameter gets it as Excel passes
+it (`Sub Go(control As IRibbonControl)`, with `control.Id` and `control.Tag`); a Sub without
+parameters runs as it is. Such callbacks aren't in `macros/list`, as in Excel's Macros box.
 
 ## What runs
 
@@ -89,7 +93,8 @@ Line numbers count the module's stored source, its `Attribute VB_Name` line incl
   `Text`, `Address`, `Row`, `Column`, `Count`, `Rows`, `Columns`, `Cells`, `Item`, `Offset`,
   `Resize`, `EntireRow`, `EntireColumn`, `End(xlUp/xlDown/xlToLeft/xlToRight)`, `Font` (`Bold`,
   `Italic`, `Color`, `Size`, `Name`, `Underline`, `Strikethrough`), `Interior.Color`,
-  `ClearContents`, `ClearFormats`, `Clear`, `Select`, `Activate`). Colours are VBA's numbers
+  `ClearContents`, `ClearFormats`, `Clear`, `Select`, `Activate`), `IRibbonControl` (`Id`, `Tag`,
+  `Context`). Colours are VBA's numbers
   (`RGB(255, 0, 0)` is red).
 
 A macro is one undo step in the app. Reads are cached (a sheet's used range is read once), writes

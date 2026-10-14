@@ -8,6 +8,7 @@
 //! macro ends.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use serde_json::{Value as Json, json};
 
@@ -69,6 +70,11 @@ pub enum XlObj {
     Rows(XlRange),
     Columns(XlRange),
     WorksheetFunction,
+    /// The ribbon button a macro was called from (`Sub Go(control As IRibbonControl)`).
+    RibbonControl {
+        id: Rc<str>,
+        tag: Rc<str>,
+    },
 }
 
 impl XlObj {
@@ -82,6 +88,7 @@ impl XlObj {
             XlObj::Font(_) => "Font",
             XlObj::Interior(_) => "Interior",
             XlObj::WorksheetFunction => "WorksheetFunction",
+            XlObj::RibbonControl { .. } => "IRibbonControl",
         }
     }
 }
@@ -703,6 +710,9 @@ impl Excel {
                 self.member(host, &XlObj::Worksheet(s), name, args, named)
             }
             (XlObj::Application, "worksheetfunction") => obj(XlObj::WorksheetFunction),
+            (XlObj::RibbonControl { id, .. }, "id") => Ok(Value::Str(id.clone())),
+            (XlObj::RibbonControl { tag, .. }, "tag") => Ok(Value::Str(tag.clone())),
+            (XlObj::RibbonControl { .. }, "context") => obj(XlObj::Application),
             (XlObj::Application, "screenupdating" | "displayalerts" | "enableevents" | "interactive") => Ok(Value::Bool(true)),
             (XlObj::Application, "calculation") => Ok(Value::Long(-4105)),
             (XlObj::Application, "statusbar") => Ok(Value::Bool(false)),

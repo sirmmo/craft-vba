@@ -81,6 +81,18 @@ fn macros_are_written_listed_run_recorded_and_removed() {
     assert_eq!(failed["error"]["data"]["module"], "Module1");
     assert!(app.request("macros/run", json!({"name": "Nope"}))["error"]["message"].as_str().unwrap().contains("Cannot run the macro"));
 
+    // A ribbon button's macro gets the button; one without parameters runs as it is.
+    let callback = "Sub Pressed(control As IRibbonControl)\r\n    Range(\"C1\").Value = control.Id & \"/\" & control.Tag\r\nEnd Sub\r\n";
+    assert_eq!(app.request("macros/saveModule", json!({"name": "Ribbon", "source": callback}))["result"], json!({}));
+    let control = json!({"id": "craftButton1", "tag": "north"});
+    assert_eq!(app.request("macros/run", json!({"name": "Ribbon.Pressed", "control": control}))["result"], json!({}));
+    assert_eq!(app.book.get("Sheet1", "C1"), json!("craftButton1/north"));
+    assert_eq!(app.request("macros/run", json!({"name": "Hello", "control": control}))["result"], json!({}));
+    let names: Vec<String> =
+        app.request("macros/list", json!({}))["result"]["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+    assert!(!names.contains(&"Ribbon.Pressed".to_string()), "a callback isn't a macro to run from the Macros list");
+    assert_eq!(app.request("macros/deleteModule", json!({"name": "Ribbon"}))["result"], json!({}));
+
     let modules = app.request("macros/modules", json!({}));
     let m = &modules["result"]["modules"][0];
     assert_eq!((m["name"].as_str(), m["kind"].as_str()), (Some("Module1"), Some("standard")));

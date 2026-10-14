@@ -274,7 +274,17 @@ impl<'a> Interp<'a> {
 
     /// Runs a macro to its end. The queued writes are sent at the end, also after an error.
     pub fn run(&mut self, module: usize, proc: usize) -> Result<(), Failure> {
-        let r = self.call_proc(module, proc, Vec::new(), Vec::new());
+        self.run_with(module, proc, Vec::new())
+    }
+
+    /// How many parameters the procedure declares.
+    pub fn param_count(&self, module: usize, proc: usize) -> usize {
+        self.prog.modules.get(module).and_then(|m| m.procs.get(proc)).map_or(0, |p| p.params.len())
+    }
+
+    /// Runs a procedure with arguments (a ribbon button's macro gets the button).
+    pub fn run_with(&mut self, module: usize, proc: usize, args: Vec<Value>) -> Result<(), Failure> {
+        let r = self.call_proc(module, proc, args.into_iter().map(ArgVal::Val).collect(), Vec::new());
         let flushed = self.excel.flush(self.host);
         let failure = |me: &Interp, f: Fail| Failure {
             number: if f.err.number == COMPILE { 0 } else { f.err.number },
