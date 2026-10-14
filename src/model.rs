@@ -1,7 +1,7 @@
 //! The host application's objects, as macros see them: Excel's in GridCraft, PowerPoint's in
-//! DeckCraft. The interpreter knows only this seam: it hands every host object ([`Obj::Xl`],
-//! [`Obj::Pp`]) and every name it doesn't know itself to the [`Model`] chosen at `initialize`
-//! (from the app's `host.id`).
+//! DeckCraft, Word's in WordCraft. The interpreter knows only this seam: it hands every host
+//! object ([`Obj::Xl`], [`Obj::Pp`], [`Obj::Wd`]) and every name it doesn't know itself to the
+//! [`Model`] chosen at `initialize` (from the app's `host.id`).
 
 use std::rc::Rc;
 
@@ -9,6 +9,7 @@ use crate::excel::{Excel, XlObj};
 use crate::host::Host;
 use crate::powerpoint::{PowerPoint, PpObj};
 use crate::vba::value::{Obj, R, Value, VbaError};
+use crate::word::{WdObj, Word};
 
 /// Which object model an app gets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18,12 +19,21 @@ pub enum App {
     Excel,
     /// PowerPoint's (DeckCraft).
     PowerPoint,
+    /// Word's (WordCraft).
+    Word,
 }
 
 impl App {
     /// The model for `initialize`'s `host.id`.
     pub fn for_host(id: &str) -> App {
-        if id.trim().eq_ignore_ascii_case("deckcraft") { App::PowerPoint } else { App::Excel }
+        let id = id.trim();
+        if id.eq_ignore_ascii_case("deckcraft") {
+            App::PowerPoint
+        } else if id.eq_ignore_ascii_case("wordcraft") {
+            App::Word
+        } else {
+            App::Excel
+        }
     }
 
     /// What the app calls the document macros live in.
@@ -31,6 +41,7 @@ impl App {
         match self {
             App::Excel => "workbook",
             App::PowerPoint => "presentation",
+            App::Word => "document",
         }
     }
 }
@@ -38,6 +49,7 @@ impl App {
 pub enum Model {
     Excel(Excel),
     PowerPoint(PowerPoint),
+    Word(Word),
 }
 
 impl Default for Model {
@@ -58,6 +70,7 @@ impl Model {
         match app {
             App::Excel => Model::Excel(Excel::default()),
             App::PowerPoint => Model::PowerPoint(PowerPoint::default()),
+            App::Word => Model::Word(Word::default()),
         }
     }
 
@@ -65,6 +78,7 @@ impl Model {
         match self {
             Model::Excel(_) => App::Excel,
             Model::PowerPoint(_) => App::PowerPoint,
+            Model::Word(_) => App::Word,
         }
     }
 
@@ -73,6 +87,7 @@ impl Model {
         match self {
             Model::Excel(x) => x.requests,
             Model::PowerPoint(p) => p.requests,
+            Model::Word(w) => w.requests,
         }
     }
 
@@ -81,6 +96,7 @@ impl Model {
         match self {
             Model::Excel(x) => x.flush(host),
             Model::PowerPoint(p) => p.flush(host),
+            Model::Word(w) => w.flush(host),
         }
     }
 
@@ -89,6 +105,7 @@ impl Model {
         match self {
             Model::Excel(_) => None,
             Model::PowerPoint(_) => crate::powerpoint::constant(name),
+            Model::Word(_) => crate::word::constant(name),
         }
     }
 
@@ -110,6 +127,7 @@ impl Model {
                 }
             }
             Model::PowerPoint(p) => p.global(host, name, args),
+            Model::Word(w) => w.global(host, name, args),
         }
     }
 
@@ -117,6 +135,7 @@ impl Model {
         match (self, o) {
             (Model::Excel(x), Obj::Xl(o)) => x.member(host, o, name, args, named),
             (Model::PowerPoint(p), Obj::Pp(o)) => p.member(host, o, name, args, named),
+            (Model::Word(w), Obj::Wd(o)) => w.member(host, o, name, args, named),
             _ => Err(foreign()),
         }
     }
@@ -126,6 +145,7 @@ impl Model {
             (Model::Excel(x), Obj::Xl(o)) => x.assign(host, o, name, args, value),
             (Model::PowerPoint(p), Obj::Pp(o)) if args.is_empty() => p.assign(host, o, name, value),
             (Model::PowerPoint(_), Obj::Pp(_)) => Err(VbaError::new(450)),
+            (Model::Word(w), Obj::Wd(o)) => w.assign(host, o, name, args, value),
             _ => Err(foreign()),
         }
     }
@@ -135,6 +155,7 @@ impl Model {
         match (self, o) {
             (Model::Excel(x), Obj::Xl(o)) => x.assign(host, o, "value", &[], value),
             (Model::PowerPoint(p), Obj::Pp(o)) => p.assign_default(host, o, value),
+            (Model::Word(w), Obj::Wd(o)) => w.assign_default(host, o, value),
             _ => Err(foreign()),
         }
     }
@@ -143,7 +164,7 @@ impl Model {
     pub fn assign_global(&mut self, host: &mut dyn Host, name: &str, args: Args, value: &Value) -> R<()> {
         match self {
             Model::Excel(x) => x.assign(host, &XlObj::Application, name, args, value),
-            Model::PowerPoint(_) => Err(VbaError::with(438, format!("{name}(…) can't be assigned to"))),
+            Model::PowerPoint(_) | Model::Word(_) => Err(VbaError::with(438, format!("{name}(…) can't be assigned to"))),
         }
     }
 
@@ -151,6 +172,7 @@ impl Model {
         match (self, o) {
             (Model::Excel(x), Obj::Xl(o)) => x.default_call(host, o, args),
             (Model::PowerPoint(p), Obj::Pp(o)) => p.default_call(host, o, args),
+            (Model::Word(w), Obj::Wd(o)) => w.default_call(host, o, args),
             _ => Err(foreign()),
         }
     }
@@ -159,6 +181,7 @@ impl Model {
         match (self, o) {
             (Model::Excel(x), Obj::Xl(o)) => x.default_value(host, o),
             (Model::PowerPoint(p), Obj::Pp(o)) => p.default_value(host, o),
+            (Model::Word(w), Obj::Wd(o)) => w.default_value(host, o),
             _ => Err(foreign()),
         }
     }
@@ -168,18 +191,19 @@ impl Model {
         match (self, o) {
             (Model::Excel(x), Obj::Xl(o)) => x.items(host, o),
             (Model::PowerPoint(p), Obj::Pp(o)) => p.items(host, o),
+            (Model::Word(w), Obj::Wd(o)) => w.items(host, o),
             _ => Err(foreign()),
         }
     }
 
     /// An object passed where a value is wanted becomes its value (a range, a text range).
     pub fn is_value(o: &Obj) -> bool {
-        matches!(o, Obj::Xl(XlObj::Range(_)) | Obj::Pp(PpObj::TextRange(_)))
+        matches!(o, Obj::Xl(XlObj::Range(_)) | Obj::Pp(PpObj::TextRange(_)) | Obj::Wd(WdObj::Range(_) | WdObj::Selection))
     }
 
     /// The `Application` object (`Application.Run`).
     pub fn is_application(o: &Obj) -> bool {
-        matches!(o, Obj::Xl(XlObj::Application) | Obj::Pp(PpObj::Application))
+        matches!(o, Obj::Xl(XlObj::Application) | Obj::Pp(PpObj::Application) | Obj::Wd(WdObj::Application))
     }
 
     /// The ribbon button a macro was called from, as an `IRibbonControl`.
@@ -187,6 +211,7 @@ impl Model {
         Value::Object(match self {
             Model::Excel(_) => Obj::Xl(XlObj::RibbonControl { id, tag }),
             Model::PowerPoint(_) => Obj::Pp(PpObj::RibbonControl { id, tag }),
+            Model::Word(_) => Obj::Wd(WdObj::RibbonControl { id, tag }),
         })
     }
 }

@@ -23,9 +23,9 @@ pub fn manifest() -> Json {
         "id": "org.craft.vba",
         "name": "VBA",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Runs the document's VBA macros (Excel's objects in GridCraft, PowerPoint's in DeckCraft), and edits and records them (the Developer tab).",
+        "description": "Runs the document's VBA macros (Excel's objects in GridCraft, PowerPoint's in DeckCraft, Word's in WordCraft), and edits and records them (the Developer tab).",
         "author": "Marco Montanari and the craft-vba contributors",
-        "apps": ["gridcraft", "deckcraft"],
+        "apps": ["gridcraft", "deckcraft", "wordcraft"],
         "run": {"command": "./craft-vba"},
         "macros": {"language": "VBA"},
         "commands": []
@@ -144,7 +144,7 @@ fn str_param<'a>(params: &'a Json, key: &str) -> Result<&'a str, Fail> {
 }
 
 /// Answers one request from the app. `initialize` sets `app` from its `host.id`: DeckCraft's
-/// macros get PowerPoint's objects, every other app Excel's.
+/// macros get PowerPoint's objects, WordCraft's Word's, every other app Excel's.
 pub fn handle(app: &mut App, host: &mut dyn Host, method: &str, params: &Json) -> Result<Json, Fail> {
     let doc = app.document();
     match method {
@@ -234,7 +234,8 @@ pub fn handle(app: &mut App, host: &mut dyn Host, method: &str, params: &Json) -
                 .and_then(Json::as_str)
                 .filter(|n| n.chars().next().is_some_and(char::is_alphabetic) && n.chars().all(|c| c.is_alphanumeric() || c == '_'))
                 .unwrap_or("Macro1");
-            Ok(json!({"source": crate::record::record(name, &steps)}))
+            let source = if *app == App::Word { crate::record::record_word(name, &steps) } else { crate::record::record(name, &steps) };
+            Ok(json!({"source": source}))
         }
         other => Err((-32601, format!("unknown method {other}"), Json::Null)),
     }

@@ -5,11 +5,12 @@ use std::rc::Rc;
 
 use crate::excel::XlObj;
 use crate::powerpoint::PpObj;
+use crate::word::WdObj;
 
 impl Obj {
     /// An object of the host application (its model answers for it).
     pub fn is_host(&self) -> bool {
-        matches!(self, Obj::Xl(_) | Obj::Pp(_))
+        matches!(self, Obj::Xl(_) | Obj::Pp(_) | Obj::Wd(_))
     }
 }
 
@@ -134,6 +135,8 @@ pub enum Obj {
     Xl(XlObj),
     /// PowerPoint's objects (DeckCraft).
     Pp(PpObj),
+    /// Word's objects (WordCraft).
+    Wd(WdObj),
     /// The `Err` object.
     Err,
     /// The `Debug` object.
@@ -177,6 +180,7 @@ impl Value {
             Value::Array(_) => "Variant()",
             Value::Object(Obj::Xl(x)) => x.type_name(),
             Value::Object(Obj::Pp(x)) => x.type_name(),
+            Value::Object(Obj::Wd(x)) => x.type_name(),
             Value::Object(Obj::Err) => "ErrObject",
             Value::Object(Obj::Debug) => "Debug",
             Value::Object(Obj::Collection(_)) => "Collection",

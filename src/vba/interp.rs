@@ -575,6 +575,11 @@ impl<'a> Interp<'a> {
         if let Some(s) = self.globals.get(mi).and_then(|g| g.get(&m.to_ascii_lowercase())) {
             return Ok(s.borrow().value.clone());
         }
+        // A document module is also the document (`ThisDocument.Content`, `ThisWorkbook.Sheets`).
+        if let Some(o) = self.global(&module.name, &[])? {
+            let vals = args.iter().map(ArgVal::value).collect();
+            return self.member(o, m, vals, Vec::new());
+        }
         Err(self.fail(compile_err(format!("Method or data member not found ({m})"))))
     }
 

@@ -1,6 +1,6 @@
 # craft-vba
 
-VBA macros for the craft apps (GridCraft and DeckCraft), as an add-in that runs in its own
+VBA macros for the craft apps (GridCraft, DeckCraft and WordCraft), as an add-in that runs in its own
 process. The app draws the Developer tab (Visual Basic, Macros, Record Macro); craft-vba does the
 language:
 
@@ -8,9 +8,10 @@ language:
 - runs its macros with an interpreter for VBA ([MS-VBAL]);
 - reaches the app's objects through its `host/sync`, the same object paths as the Office
   add-ins' bridge: Excel's (`Range`, `Cells`, `Worksheets`, …) in GridCraft, PowerPoint's
-  (`ActivePresentation`, `Slides`, `Shapes`, …) in DeckCraft, chosen by `initialize`'s `host.id`
-  (`deckcraft` gets PowerPoint's, every other app Excel's);
-- records GridCraft's commands as a VBA Sub.
+  (`ActivePresentation`, `Slides`, `Shapes`, …) in DeckCraft, Word's (`ActiveDocument`,
+  `Paragraphs`, `Selection`, …) in WordCraft, chosen by `initialize`'s `host.id` (`deckcraft`
+  gets PowerPoint's, `wordcraft` Word's, every other app Excel's);
+- records GridCraft's and WordCraft's commands as a VBA Sub.
 
 It speaks the craft plugin protocol (JSON-RPC 2.0 over standard input and output, one message per
 line), version 1.1. Everything comes from the published specifications and public documentation
@@ -47,7 +48,7 @@ The app asks (besides `initialize`):
 | `macros/modules {}` | `{"modules": [{"name", "kind": "standard"\|"class"\|"document", "source"}]}` |
 | `macros/saveModule {"name", "source"}` | `{}` (or `{"compileError": {"line", "message"}}`: saved anyway); creates the project when there's none |
 | `macros/deleteModule {"name"}` | `{}` |
-| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` (in DeckCraft an error: PowerPoint has no macro recorder) |
+| `macros/record {"steps": [{"command", "params"}], "name"?}` | `{"source": "Sub Macro1()…End Sub"}` (Excel's objects in GridCraft, Word's in WordCraft; in DeckCraft an error: PowerPoint has no macro recorder) |
 
 While the app waits for an answer, craft-vba asks it:
 
@@ -131,6 +132,47 @@ parameters runs as it is. Such callbacks aren't in `macros/list`, as in Excel's 
 - Tri-states read as `msoTrue` (-1), `msoFalse` (0) or `msoTriStateMixed` (-2); colours are
   VBA's numbers. `Slides(99)` is run-time error 9, as a missing slide or shape is.
 
+### Word (WordCraft)
+
+- `Application` (`ActiveDocument`, `ThisDocument`, `Documents`, `Selection`, `Name`, `Version`,
+  `Run`), `Documents` (`Count` = 1, `Documents(1)` or by name), `Document` (`Content`,
+  `Paragraphs`, `Range` (`Range()` is the whole document, `Range(0, 0)` its start), `Name`,
+  `BuiltInDocumentProperties("Title"/"Subject"/"Author"/"Keywords"/"Comments")` (or
+  `wdPropertyTitle`…, `.Value`), `Styles(name or wdStyle…)`, `Save`). A `ThisDocument` module
+  is also the document (`ThisDocument.Paragraphs`).
+- `Paragraphs` (`Count`, `Item`/`(i)`, `First`, `Last`, `Add`, `For Each`), `Paragraph`
+  (`Range`, `Style`, `Alignment`, `SpaceAfter`, `SpaceBefore`, `LeftIndent`, `RightIndent`,
+  `FirstLineIndent`, `LineSpacing`, `Format`, `Next`, `Previous` (`Nothing` past the ends)).
+- `Range` (`Text` (paragraphs end with `vbCr`, as in Word; a paragraph's range and `Content`
+  end with the final mark), `InsertAfter`, `InsertBefore`, `InsertParagraphAfter`,
+  `InsertParagraphBefore`, `Font`, `Bold`, `Italic`, `Style`, `Paragraphs`, `ParagraphFormat`,
+  `HighlightColorIndex`, `Select`, `Delete`), `ParagraphFormat` (`Alignment`, spacing and
+  indents, over all the range's paragraphs), `Font` (`Bold`, `Italic` (`True`, `False`,
+  `wdToggle`), `Size`, `Name`, `Color`, `Underline`), `Style` (`Name`, `NameLocal`).
+- `Selection` (`Text`, `TypeText`, `TypeParagraph`, `Font`, `Range`, `Paragraphs`,
+  `ParagraphFormat`, `Style`, `HomeKey`/`EndKey Unit:=wdStory`, `WholeStory`, and the
+  `Range` members above), `IRibbonControl`.
+- Constants: `wdAlignParagraph…`, `wdUnderline…` (`None`, `Single`, `Words`, `Double`,
+  `Dotted`, `Thick`, `Dash`, `DotDash`, `DotDotDash`, `Wavy`), `wdColor…` (`Black`, `White`,
+  `Red`, `Green`, `BrightGreen`, `Blue`, `Yellow`, `Turquoise`, `Pink`, `DarkRed`, `DarkBlue`,
+  `Teal`, `Violet`, `DarkYellow`, `Gray50`, `Gray25`, `Orange`, `Gold`, `Automatic`), the
+  highlight indexes (`wdNoHighlight`, `wdBlack` … `wdYellow` 7 … `wdGray25`), `wdStyle…`
+  (`Normal`, `Heading1`…`Heading9`, `Title`, `Subtitle`, `ListParagraph`, `Quote`,
+  `IntenseQuote`), `wdProperty…`, `wdUndefined`, `wdToggle`, `wdStory`, `wdLine`, `wdExtend`.
+- Colours are VBA's numbers (`RGB(255, 0, 0)` is red). A font property that differs across
+  the text reads `wdUndefined` (9999999), as in Word (a name reads `""`), and so does a
+  paragraph format that differs across a range's paragraphs. `Paragraphs(99)` is run-time
+  error 9.
+- The recorder writes WordCraft's steps as Word does: `text.insert` → `Selection.TypeText`
+  (line breaks in it → `Selection.TypeParagraph`), `text.newParagraph` →
+  `Selection.TypeParagraph`, `format.bold`/`italic` → `Selection.Font.Bold = True|False|wdToggle`,
+  `format.underline`, `format.size`, `format.font`, `format.color` (→ `wdColor…` or `RGB(…)`),
+  `format.highlight` → `Selection.Range.HighlightColorIndex`, `para.style` →
+  `Selection.Style = ActiveDocument.Styles("…")`, `para.alignLeft/alignCenter/alignRight/justify`
+  and `para.align` → `Selection.ParagraphFormat.Alignment`, `caret.docStart`/`docEnd` →
+  `Selection.HomeKey`/`EndKey Unit:=wdStory`, `select.all` → `Selection.WholeStory`; any
+  other step becomes a comment (`' (step not recorded: caret.left)`).
+
 A macro is one undo step in the app. Reads are cached (a sheet's used range is read once), writes
 are sent in batches.
 
@@ -144,6 +186,18 @@ are sent in batches.
   the layout by its standard name (Title Slide, Title and Content, Blank, …) in the first
   master's layouts and uses the app's default layout when it can't; several selected shapes
   answer only the members listed above.
+- Word: not yet character positions (`Range.Start`/`End`, `Document.Range(Start, End)` other
+  than `(0, 0)`, `Characters`, `Words`, `Sentences`, `Selection.MoveLeft` and friends,
+  `HomeKey`/`EndKey` other than `wdStory`), `Find`, tables, fields, bookmarks, lists, sections,
+  headers and footers, inline shapes, `wdColorAutomatic` as a colour to set,
+  `wdAlignParagraphDistribute`, other document properties and custom ones, `Styles.Add`.
+  Paragraphs and ranges are known by the app's ids, which are positions: after a paragraph is
+  added or removed before one a macro holds (`Set p = …`), reach it again; a range from
+  `Selection.Range` follows its text when its `Text` is set, keeps its extent after
+  `InsertAfter`, and can't be used after `InsertBefore`/`InsertParagraphBefore`/`Delete`
+  (run-time error 5). `InsertAfter` on a paragraph's range adds the text at the end of the
+  paragraph (before its mark). Mixed highlights read as `wdNoHighlight` (the bridge answers
+  both as `null`).
 - Not yet: class modules (`New Class1`), `Type`, `Property Let/Set`, `GoSub`, `Resume` without a
   label, `InputBox`, UserForms, events (`Workbook_Open`, `Worksheet_Change`), `Declare` (Windows
   API calls), `CreateObject` (COM), `Shell`, file I/O, date literals (`#1/2/2026#`), `Like` is

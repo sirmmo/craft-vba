@@ -1,4 +1,5 @@
-//! `macros/record`: GridCraft commands, as the app recorded them, written as a VBA Sub.
+//! `macros/record`: GridCraft's (or WordCraft's) commands, as the app recorded them, written as a
+//! VBA Sub.
 
 use serde_json::Value as Json;
 
@@ -143,6 +144,209 @@ pub fn record(name: &str, steps: &[Json]) -> String {
     src
 }
 
+/// Text as a VBA expression: quoted, with tabs and other control characters as `vbTab`/`Chr(n)`.
+fn text_literal(s: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut run = String::new();
+    for c in s.chars() {
+        if c.is_control() {
+            if !run.is_empty() {
+                parts.push(quote(&std::mem::take(&mut run)));
+            }
+            parts.push(if c == '\t' { "vbTab".to_string() } else { format!("ChrW({})", u32::from(c)) });
+        } else {
+            run.push(c);
+        }
+    }
+    if !run.is_empty() || parts.is_empty() {
+        parts.push(quote(&run));
+    }
+    parts.join(" & ")
+}
+
+fn not_recorded(command: &str, out: &mut Vec<String>) {
+    let name: String = command.chars().filter(|c| !c.is_control()).take(200).collect();
+    out.push(format!("' (step not recorded: {name})"));
+}
+
+/// `True`/`False` for a flag command's `value`, `wdToggle` without one (as Word records a
+/// toggle button).
+fn word_flag(p: &Json, what: &str, out: &mut Vec<String>) {
+    let v = match p.get("value").and_then(Json::as_bool) {
+        Some(true) => "True",
+        Some(false) => "False",
+        None => "wdToggle",
+    };
+    out.push(format!("Selection.Font.{what} = {v}"));
+}
+
+/// The `wdColor…` constant for `RRGGBB`, else `RGB(r, g, b)`.
+fn word_color(hex: &str) -> Option<String> {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    let (r, g, b) = ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+    let named = match (r, g, b) {
+        (0, 0, 0) => Some("wdColorBlack"),
+        (255, 255, 255) => Some("wdColorWhite"),
+        (255, 0, 0) => Some("wdColorRed"),
+        (0, 0, 255) => Some("wdColorBlue"),
+        (0, 128, 0) => Some("wdColorGreen"),
+        (255, 255, 0) => Some("wdColorYellow"),
+        _ => None,
+    };
+    Some(named.map(str::to_string).unwrap_or_else(|| format!("RGB({r}, {g}, {b})")))
+}
+
+fn word_highlight(name: &str) -> Option<&'static str> {
+    let k = name.replace([' ', '-', '%'], "").to_ascii_lowercase();
+    Some(match k.as_str() {
+        "none" => "wdNoHighlight",
+        "yellow" => "wdYellow",
+        "brightgreen" => "wdBrightGreen",
+        "turquoise" => "wdTurquoise",
+        "pink" => "wdPink",
+        "blue" => "wdBlue",
+        "red" => "wdRed",
+        "darkblue" => "wdDarkBlue",
+        "teal" => "wdTeal",
+        "green" => "wdGreen",
+        "violet" => "wdViolet",
+        "darkred" => "wdDarkRed",
+        "darkyellow" => "wdDarkYellow",
+        "gray50" => "wdGray50",
+        "gray25" => "wdGray25",
+        "black" => "wdBlack",
+        "white" => "wdWhite",
+        _ => return None,
+    })
+}
+
+fn word_underline(style: &str) -> Option<&'static str> {
+    Some(match style.to_ascii_lowercase().as_str() {
+        "none" => "wdUnderlineNone",
+        "single" => "wdUnderlineSingle",
+        "words" | "word" => "wdUnderlineWords",
+        "double" => "wdUnderlineDouble",
+        "dotted" => "wdUnderlineDotted",
+        "thick" => "wdUnderlineThick",
+        "dash" => "wdUnderlineDash",
+        "dotdash" => "wdUnderlineDotDash",
+        "dotdotdash" => "wdUnderlineDotDotDash",
+        "wave" | "wavy" => "wdUnderlineWavy",
+        _ => return None,
+    })
+}
+
+fn align(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "left" => "wdAlignParagraphLeft",
+        "center" => "wdAlignParagraphCenter",
+        "right" => "wdAlignParagraphRight",
+        "justify" | "both" => "wdAlignParagraphJustify",
+        _ => return None,
+    })
+}
+
+fn word_line(command: &str, p: &Json, out: &mut Vec<String>) {
+    let s = |k: &str| p.get(k).and_then(Json::as_str);
+    let extend = p.get("extend").and_then(Json::as_bool) == Some(true);
+    match command {
+        "text.insert" => {
+            let text = s("text").unwrap_or("").replace("\r\n", "\n").replace('\r', "\n");
+            for (i, part) in text.split('\n').enumerate() {
+                if i > 0 {
+                    out.push("Selection.TypeParagraph".into());
+                }
+                if !part.is_empty() {
+                    out.push(format!("Selection.TypeText Text:={}", text_literal(part)));
+                }
+            }
+        }
+        "text.newParagraph" => out.push("Selection.TypeParagraph".into()),
+        "format.bold" => word_flag(p, "Bold", out),
+        "format.italic" => word_flag(p, "Italic", out),
+        "format.underline" => {
+            let on = p.get("value").and_then(Json::as_bool);
+            match (on, s("style")) {
+                (Some(false), _) => out.push("Selection.Font.Underline = wdUnderlineNone".into()),
+                (_, Some(style)) => match word_underline(style) {
+                    Some(c) => out.push(format!("Selection.Font.Underline = {c}")),
+                    None => not_recorded(command, out),
+                },
+                (Some(true), None) => out.push("Selection.Font.Underline = wdUnderlineSingle".into()),
+                (None, None) => out.push(
+                    "If Selection.Font.Underline = wdUnderlineNone Then Selection.Font.Underline = wdUnderlineSingle Else Selection.Font.Underline = wdUnderlineNone"
+                        .into(),
+                ),
+            }
+        }
+        "format.doubleUnderline" => out.push("Selection.Font.Underline = wdUnderlineDouble".into()),
+        "format.size" => match p.get("size").and_then(Json::as_f64).filter(|v| v.is_finite()) {
+            Some(v) => out.push(format!("Selection.Font.Size = {v}")),
+            None => not_recorded(command, out),
+        },
+        "format.font" => match s("name").filter(|n| !n.trim().is_empty()) {
+            Some(n) => out.push(format!("Selection.Font.Name = {}", quote(n))),
+            None => not_recorded(command, out),
+        },
+        "format.color" => match s("color").and_then(word_color) {
+            Some(c) => out.push(format!("Selection.Font.Color = {c}")),
+            None => not_recorded(&format!("{command} {}", s("color").unwrap_or("")), out),
+        },
+        "format.highlight" => match word_highlight(s("color").unwrap_or("yellow")) {
+            Some(c) => out.push(format!("Selection.Range.HighlightColorIndex = {c}")),
+            None => not_recorded(command, out),
+        },
+        "para.style" => match s("style").filter(|n| !n.trim().is_empty()) {
+            Some(n) => out.push(format!("Selection.Style = ActiveDocument.Styles({})", quote(n))),
+            None => not_recorded(command, out),
+        },
+        "para.alignLeft" | "para.alignCenter" | "para.alignRight" | "para.justify" => {
+            let v = match command {
+                "para.alignLeft" => "wdAlignParagraphLeft",
+                "para.alignCenter" => "wdAlignParagraphCenter",
+                "para.alignRight" => "wdAlignParagraphRight",
+                _ => "wdAlignParagraphJustify",
+            };
+            out.push(format!("Selection.ParagraphFormat.Alignment = {v}"));
+        }
+        "para.align" => match s("value").and_then(align) {
+            Some(v) => out.push(format!("Selection.ParagraphFormat.Alignment = {v}")),
+            None => not_recorded(command, out),
+        },
+        "caret.docStart" if !extend => out.push("Selection.HomeKey Unit:=wdStory".into()),
+        "caret.docEnd" if !extend => out.push("Selection.EndKey Unit:=wdStory".into()),
+        "select.all" => out.push("Selection.WholeStory".into()),
+        other => not_recorded(other, out),
+    }
+}
+
+/// The Sub for WordCraft's `steps` (`[{command, params}]`), called `name`.
+pub fn record_word(name: &str, steps: &[Json]) -> String {
+    let mut lines = Vec::new();
+    for st in steps {
+        if lines.len() >= MAX_LINES {
+            lines.push("' (the recording was cut short)".to_string());
+            break;
+        }
+        let command = st.get("command").and_then(Json::as_str).unwrap_or("");
+        let params = st.get("params").cloned().unwrap_or(Json::Null);
+        word_line(command, &params, &mut lines);
+    }
+    lines.truncate(MAX_LINES + 1);
+    let mut src = format!("Sub {name}()\r\n");
+    for l in lines {
+        src.push_str("    ");
+        src.push_str(&l);
+        src.push_str("\r\n");
+    }
+    src.push_str("End Sub\r\n");
+    src
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -172,5 +376,80 @@ mod tests {
         assert_eq!(src, expected);
         // What it records parses.
         assert!(crate::vba::parser::parse_module("M", &src).is_ok());
+    }
+
+    #[test]
+    fn wordcraft_steps_become_word_vba() {
+        let src = super::record_word(
+            "Macro1",
+            &[
+                json!({"command": "text.insert", "params": {"text": "Say \"hi\"\tnow"}}),
+                json!({"command": "text.newParagraph", "params": {}}),
+                json!({"command": "text.insert", "params": {"text": "a\rb"}}),
+                json!({"command": "format.bold", "params": {"value": true}}),
+                json!({"command": "format.italic", "params": {"value": false}}),
+                json!({"command": "format.bold", "params": {}}),
+                json!({"command": "format.underline", "params": {"value": true}}),
+                json!({"command": "format.underline", "params": {"style": "double"}}),
+                json!({"command": "format.underline", "params": {}}),
+                json!({"command": "format.size", "params": {"size": 14}}),
+                json!({"command": "format.size", "params": {"size": 10.5}}),
+                json!({"command": "format.font", "params": {"name": "Georgia"}}),
+                json!({"command": "format.color", "params": {"color": "FF0000"}}),
+                json!({"command": "format.color", "params": {"color": "1A2B3C"}}),
+                json!({"command": "format.color", "params": {"color": "auto"}}),
+                json!({"command": "format.highlight", "params": {"color": "brightGreen"}}),
+                json!({"command": "para.style", "params": {"style": "Heading 1"}}),
+                json!({"command": "para.alignCenter"}),
+                json!({"command": "para.justify", "params": {}}),
+                json!({"command": "para.align", "params": {"value": "right"}}),
+                json!({"command": "caret.left", "params": {}}),
+                json!({"command": "caret.docStart", "params": {}}),
+                json!({"command": "caret.docEnd", "params": {"extend": true}}),
+                json!({"command": "select.all", "params": {}}),
+                json!({"command": "table.insert\r\nEvil", "params": {"rows": 2}}),
+                json!({"params": {}}),
+            ],
+        );
+        let expected = [
+            "Sub Macro1()",
+            "    Selection.TypeText Text:=\"Say \"\"hi\"\"\" & vbTab & \"now\"",
+            "    Selection.TypeParagraph",
+            "    Selection.TypeText Text:=\"a\"",
+            "    Selection.TypeParagraph",
+            "    Selection.TypeText Text:=\"b\"",
+            "    Selection.Font.Bold = True",
+            "    Selection.Font.Italic = False",
+            "    Selection.Font.Bold = wdToggle",
+            "    Selection.Font.Underline = wdUnderlineSingle",
+            "    Selection.Font.Underline = wdUnderlineDouble",
+            "    If Selection.Font.Underline = wdUnderlineNone Then Selection.Font.Underline = wdUnderlineSingle Else Selection.Font.Underline = wdUnderlineNone",
+            "    Selection.Font.Size = 14",
+            "    Selection.Font.Size = 10.5",
+            "    Selection.Font.Name = \"Georgia\"",
+            "    Selection.Font.Color = wdColorRed",
+            "    Selection.Font.Color = RGB(26, 43, 60)",
+            "    ' (step not recorded: format.color auto)",
+            "    Selection.Range.HighlightColorIndex = wdBrightGreen",
+            "    Selection.Style = ActiveDocument.Styles(\"Heading 1\")",
+            "    Selection.ParagraphFormat.Alignment = wdAlignParagraphCenter",
+            "    Selection.ParagraphFormat.Alignment = wdAlignParagraphJustify",
+            "    Selection.ParagraphFormat.Alignment = wdAlignParagraphRight",
+            "    ' (step not recorded: caret.left)",
+            "    Selection.HomeKey Unit:=wdStory",
+            "    ' (step not recorded: caret.docEnd)",
+            "    Selection.WholeStory",
+            "    ' (step not recorded: table.insertEvil)",
+            "    ' (step not recorded: )",
+            "End Sub",
+            "",
+        ]
+        .join("\r\n");
+        assert_eq!(src, expected);
+        assert!(crate::vba::parser::parse_module("M", &src).is_ok());
+        assert_eq!(super::text_literal("\u{b}"), "ChrW(11)");
+        assert_eq!(super::text_literal(""), "\"\"");
+        let many: Vec<_> = (0..20_000).map(|_| json!({"command": "text.newParagraph"})).collect();
+        assert!(super::record_word("M", &many).lines().count() < 10_010);
     }
 }

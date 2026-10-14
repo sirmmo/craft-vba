@@ -5,12 +5,15 @@
 mod fakedeck;
 #[path = "../src/fakehost.rs"]
 mod fakehost;
+#[path = "../src/fakeword.rs"]
+mod fakeword;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use fakedeck::Deck;
 use fakehost::Book;
+use fakeword::Doc;
 use serde_json::{Value as Json, json};
 
 struct App {
@@ -20,6 +23,8 @@ struct App {
     book: Book,
     /// Answers the host requests instead of the workbook when the app is DeckCraft.
     deck: Option<Deck>,
+    /// Answers the host requests instead of the workbook when the app is WordCraft.
+    doc: Option<Doc>,
     next: u64,
 }
 
@@ -28,7 +33,7 @@ impl App {
         let mut child = Command::new(env!("CARGO_BIN_EXE_craft-vba")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        App { child, stdin, stdout, book: Book::default(), deck: None, next: 1 }
+        App { child, stdin, stdout, book: Book::default(), deck: None, doc: None, next: 1 }
     }
 
     /// Sends a request and answers the add-in's host requests until its reply comes.
@@ -41,9 +46,10 @@ impl App {
             assert!(self.stdout.read_line(&mut line).unwrap() > 0, "the add-in exited");
             let msg: Json = serde_json::from_str(&line).unwrap();
             if let Some(m) = msg.get("method").and_then(Json::as_str) {
-                let answer = match &mut self.deck {
-                    Some(d) => d.handle(m, &msg["params"]),
-                    None => self.book.handle(m, &msg["params"]),
+                let answer = match (&mut self.deck, &mut self.doc) {
+                    (Some(d), _) => d.handle(m, &msg["params"]),
+                    (None, Some(d)) => d.handle(m, &msg["params"]),
+                    (None, None) => self.book.handle(m, &msg["params"]),
                 };
                 let reply = match answer {
                     Ok(result) => json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}),
@@ -124,7 +130,7 @@ fn macros_are_written_listed_run_recorded_and_removed() {
 #[test]
 fn powerpoint_macros_run_in_deckcraft() {
     let manifest: Json = serde_json::from_slice(&Command::new(env!("CARGO_BIN_EXE_craft-vba")).arg("--manifest").output().unwrap().stdout).unwrap();
-    assert_eq!(manifest["apps"], json!(["gridcraft", "deckcraft"]));
+    assert_eq!(manifest["apps"], json!(["gridcraft", "deckcraft", "wordcraft"]));
 
     let mut app = App::start();
     app.deck = Some(Deck::default());
@@ -162,6 +168,82 @@ fn powerpoint_macros_run_in_deckcraft() {
 
     let recorded = app.request("macros/record", json!({"steps": []}));
     assert_eq!(recorded["error"]["message"], "PowerPoint has no macro recorder");
+
+    writeln!(app.stdin, "{}", json!({"jsonrpc": "2.0", "method": "shutdown"})).unwrap();
+    assert!(app.child.wait().unwrap().success());
+}
+
+#[test]
+fn word_macros_run_and_record_in_wordcraft() {
+    let mut app = App::start();
+    app.doc = Some(Doc::default());
+    assert_eq!(app.request("initialize", json!({"protocolVersion": 1, "host": {"id": "wordcraft"}}))["result"]["protocolVersion"], 1);
+    assert_eq!(app.request("macros/list", json!({}))["result"]["macros"], json!([]), "no project yet");
+    let run = app.request("macros/run", json!({"name": "Build"}));
+    assert_eq!(run["error"]["message"], "Cannot run the macro 'Build'. This document has no macros.");
+    let source = "Sub Build()\r\n\
+                  \x20   Dim p As Paragraph\r\n\
+                  \x20   For Each p In ActiveDocument.Paragraphs\r\n\
+                  \x20       p.SpaceAfter = 6\r\n\
+                  \x20   Next\r\n\
+                  \x20   With ActiveDocument.Paragraphs.Add\r\n\
+                  \x20       .Range.Text = \"Added\"\r\n\
+                  \x20       .Style = wdStyleHeading2\r\n\
+                  \x20       .Alignment = wdAlignParagraphCenter\r\n\
+                  \x20       .Range.Font.Color = RGB(255, 0, 0)\r\n\
+                  \x20   End With\r\n\
+                  \x20   ActiveDocument.BuiltInDocumentProperties(\"Title\") = \"Built\"\r\n\
+                  \x20   MsgBox ActiveDocument.Paragraphs.Count & \" paragraphs\"\r\n\
+                  End Sub\r\n\
+                  Sub Bad()\r\n    ActiveDocument.Paragraphs(99).Range.Delete\r\nEnd Sub\r\n\
+                  Sub Pressed(control As IRibbonControl)\r\n    ActiveDocument.Paragraphs(1).Range.Text = control.Id & \"/\" & control.Tag\r\nEnd Sub\r\n";
+    assert_eq!(app.request("macros/saveModule", json!({"name": "Module1", "source": source}))["result"], json!({}));
+    let names: Vec<String> =
+        app.request("macros/list", json!({}))["result"]["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["Module1.Build", "Module1.Bad"]);
+
+    assert_eq!(app.request("macros/run", json!({"name": "Build"}))["result"], json!({}));
+    let doc = app.doc.as_ref().unwrap();
+    assert_eq!(doc.texts(), ["Hello world", "Second paragraph.", "Third.", "Added"]);
+    let added = &doc.paras[3];
+    assert_eq!((added.style.as_str(), added.alignment.as_str(), added.chars[0].1.color.as_str()), ("Heading 2", "Centered", "#FF0000"));
+    assert!(doc.paras[..3].iter().all(|p| p.space_after == 6.0));
+    assert_eq!(doc.title, "Built");
+    assert_eq!(doc.messages, vec![("4 paragraphs".to_string(), None)]);
+
+    let failed = app.request("macros/run", json!({"name": "Bad"}));
+    assert_eq!(failed["error"]["message"], "Run-time error '9': Subscript out of range");
+    assert_eq!(failed["error"]["data"]["number"], 9);
+
+    let control = json!({"id": "wordButton", "tag": "west"});
+    assert_eq!(app.request("macros/run", json!({"name": "Module1.Pressed", "control": control}))["result"], json!({}));
+    assert_eq!(app.doc.as_ref().unwrap().texts()[0], "wordButton/west");
+    assert_eq!(app.request("macros/run", json!({"name": "Build", "control": control}))["result"], json!({}), "a macro without parameters runs as it is");
+
+    // The recorder writes WordCraft's steps as Word VBA, and what it writes runs.
+    let steps = json!([
+        {"command": "caret.docEnd", "params": {}},
+        {"command": "text.newParagraph", "params": {}},
+        {"command": "format.bold", "params": {"value": true}},
+        {"command": "text.insert", "params": {"text": "Recorded"}},
+        {"command": "para.alignRight", "params": {}},
+        {"command": "para.style", "params": {"style": "Quote"}},
+        {"command": "caret.left", "params": {}}
+    ]);
+    let recorded = app.request("macros/record", json!({"steps": steps, "name": "Typed"}));
+    let src = recorded["result"]["source"].as_str().unwrap().to_string();
+    assert_eq!(
+        src,
+        "Sub Typed()\r\n    Selection.EndKey Unit:=wdStory\r\n    Selection.TypeParagraph\r\n    Selection.Font.Bold = True\r\n    \
+         Selection.TypeText Text:=\"Recorded\"\r\n    Selection.ParagraphFormat.Alignment = wdAlignParagraphRight\r\n    \
+         Selection.Style = ActiveDocument.Styles(\"Quote\")\r\n    ' (step not recorded: caret.left)\r\nEnd Sub\r\n"
+    );
+    assert_eq!(app.request("macros/saveModule", json!({"name": "Recorded", "source": src}))["result"], json!({}));
+    assert_eq!(app.request("macros/run", json!({"name": "Typed"}))["result"], json!({}));
+    let doc = app.doc.as_ref().unwrap();
+    let last = doc.paras.last().unwrap();
+    assert_eq!((last.text().as_str(), last.alignment.as_str(), last.style.as_str()), ("Recorded", "Right", "Quote"));
+    assert!(last.chars.iter().all(|(_, f)| f.bold), "typed after Bold was set at the caret");
 
     writeln!(app.stdin, "{}", json!({"jsonrpc": "2.0", "method": "shutdown"})).unwrap();
     assert!(app.child.wait().unwrap().success());
