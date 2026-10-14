@@ -13,7 +13,16 @@ It speaks the craft plugin protocol (JSON-RPC 2.0 over standard input and output
 line), version 1.1. Everything comes from the published specifications and public documentation
 (clean room).
 
-## Building and installing
+## Installing
+
+In GridCraft, open **File › Options › Add-ins**, type `sirmmo/craft-vba` in **Install from GitHub**
+and confirm. GridCraft downloads the release zip for your computer (macOS Apple silicon or Intel,
+Windows x64, Linux x86_64) and loads it; the **Developer** tab appears. Macros in a workbook
+stay off until you click **Enable Content** (Developer › Macro Security changes that).
+
+This needs a GridCraft with protocol 1.1 and the Developer tab (branch `feat/officejs` for now).
+
+## Building from source
 
 ```sh
 cargo build --release
