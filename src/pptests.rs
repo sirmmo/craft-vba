@@ -449,3 +449,20 @@ End Sub"#,
     r.unwrap();
     assert_eq!(d.slides.iter().map(|s| s.id).collect::<Vec<_>>(), [300]);
 }
+
+#[test]
+fn shape_constants_use_the_vba_names_first() {
+    let out = logs("Sub Main()\r\nDebug.Print msoShapePentagon\r\nDebug.Print msoShapeRegularPentagon\r\nDebug.Print msoShapeRightTriangle\r\nEnd Sub\r\n");
+    assert_eq!(out, ["51", "12", "8"]);
+}
+
+#[test]
+fn right_triangles_and_home_plates_are_recorded() {
+    let steps = [
+        serde_json::json!({"command": "shape.insert", "params": {"preset": "rtTriangle", "rect": [10, 20, 30, 40]}}),
+        serde_json::json!({"command": "shape.insert", "params": {"preset": "homePlate", "rect": [10, 20, 30, 40]}}),
+    ];
+    let src = crate::record::record_powerpoint("Macro1", &steps);
+    assert!(src.contains("AddShape(msoShapeRightTriangle, 10, 20, 30, 40)"), "{src}");
+    assert!(src.contains("AddShape(msoShapePentagon, 10, 20, 30, 40)"), "{src}");
+}

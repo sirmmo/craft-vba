@@ -107,7 +107,7 @@ pub fn constant(name: &str) -> Option<Value> {
     let l = |x: i32| Some(Value::Long(x));
     let n = name.to_ascii_lowercase();
     if let Some(shape) = n.strip_prefix("msoshape")
-        && let Some((v, _)) = AUTO_SHAPES.iter().chain(AUTO_SHAPE_ALIASES).find(|(_, k)| k.eq_ignore_ascii_case(shape))
+        && let Some((v, _)) = AUTO_SHAPE_ALIASES.iter().chain(AUTO_SHAPES).find(|(_, k)| k.eq_ignore_ascii_case(shape))
     {
         return l(*v);
     }
@@ -198,6 +198,7 @@ const AUTO_SHAPES: &[(i32, &str)] = &[
 ];
 
 /// The `msoShape…` constants' own names, where they differ from the JavaScript ones.
+/// Searched first: `msoShapePentagon` is the arrow (51), not `GeometricShapeType`'s `pentagon` (12).
 const AUTO_SHAPE_ALIASES: &[(i32, &str)] = &[
     (5, "roundedRectangle"),
     (7, "isoscelesTriangle"),
